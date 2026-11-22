@@ -1,6 +1,7 @@
 //! Local, recursive music import. Original media is never modified.
 
 use lofty::{
+    config::ParseOptions,
     file::{AudioFile, TaggedFileExt},
     prelude::*,
     probe::Probe,
@@ -8,7 +9,7 @@ use lofty::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -22,6 +23,15 @@ pub struct Track {
     pub artist: String,
     pub album: String,
     pub album_artist: String,
+    /// `None` identifies a collection saved before album-artist provenance was kept.
+    #[serde(default)]
+    pub album_artist_missing: Option<bool>,
+    /// The embedded compilation flag, kept separate from inferred grouping.
+    #[serde(default)]
+    pub compilation: bool,
+    /// Derived from the current album evidence, rather than an embedded tag.
+    #[serde(default)]
+    pub album_folder: bool,
     pub genre: String,
     pub year: Option<u32>,
     pub track_number: Option<u32>,
@@ -115,7 +125,146 @@ pub fn scan_paths(paths: &[PathBuf], cache_dir: &Path) -> ScanResult {
             .tracks
             .push(read_track(&path, cache_dir, &mut result.warnings));
     }
+    normalize_album_artists(&mut result.tracks);
     result
+}
+
+fn album_credit(tag: &lofty::tag::Tag, artist: &str) -> (String, bool, bool) {
+    let compilation = tag
+        .get_string(ItemKey::FlagCompilation)
+        .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+    if let Some(credit) = tag
+        .get_string(ItemKey::AlbumArtist)
+        .filter(|value| !value.trim().is_empty())
+    {
+        return (credit.to_owned(), false, compilation);
+    }
+    (
+        if compilation {
+            "Various Artists"
+        } else {
+            artist
+        }
+        .to_owned(),
+        true,
+        compilation,
+    )
+}
+
+/// Conventional numbered disc folders belong to their parent release directory.
+pub fn album_directory(path: &Path) -> &Path {
+    let folder = path.parent().unwrap_or(Path::new(""));
+    let numbered_disc = folder
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            let name = name.to_ascii_lowercase();
+            name.strip_prefix("disc")
+                .or_else(|| name.strip_prefix("cd"))
+                .is_some_and(|number| {
+                    let number = number.trim_start_matches([' ', '-', '_']);
+                    !number.is_empty() && number.chars().all(|c| c.is_ascii_digit())
+                })
+        });
+    if numbered_disc {
+        folder.parent().unwrap_or(folder)
+    } else {
+        folder
+    }
+}
+
+fn backfill_album_credit(track: &mut Track, offline_evidence: bool) {
+    if track.album_artist_missing.is_some() || track.album_artist != track.artist {
+        return;
+    }
+    match Probe::open(&track.path).and_then(|probe| {
+        probe
+            .options(
+                ParseOptions::new()
+                    .read_properties(false)
+                    .read_cover_art(false),
+            )
+            .read()
+    }) {
+        Ok(file) => {
+            let (credit, missing, compilation) = file
+                .primary_tag()
+                .or_else(|| file.first_tag())
+                .map(|tag| album_credit(tag, &track.artist))
+                .unwrap_or_else(|| (track.artist.clone(), true, false));
+            track.album_artist = credit;
+            track.album_artist_missing = Some(missing);
+            track.compilation = compilation;
+        }
+        Err(_) if offline_evidence => track.album_artist_missing = Some(true),
+        Err(_) => {}
+    }
+}
+
+/// Infer credits from current release evidence without changing explicit tags.
+pub fn normalize_album_artists(tracks: &mut [Track]) {
+    let mut albums: BTreeMap<_, Vec<usize>> = BTreeMap::new();
+    for (index, track) in tracks.iter().enumerate() {
+        albums
+            .entry((
+                album_directory(&track.path).to_owned(),
+                track.album.clone(),
+                track.release_id.clone(),
+            ))
+            .or_default()
+            .push(index);
+    }
+    for ((folder, album, release), indices) in albums {
+        let eligible = release.is_none() && album != "Unknown album";
+        let performers: BTreeSet<_> = indices.iter().map(|&i| tracks[i].artist.clone()).collect();
+        let normalized = |name: &str| {
+            name.chars()
+                .filter(|c| c.is_alphanumeric())
+                .flat_map(char::to_lowercase)
+                .collect::<String>()
+        };
+        let named_folder = folder
+            .file_name()
+            .and_then(|s| s.to_str())
+            .is_some_and(|name| normalized(name) == normalized(&album));
+        let cover = &tracks[indices[0]].cover;
+        let shared_cover = cover.is_some() && indices.iter().all(|&i| tracks[i].cover == *cover);
+        // Offline legacy data needs stronger evidence than readable source tags.
+        if eligible
+            && (performers.len() > 1
+                || indices
+                    .iter()
+                    .any(|&i| tracks[i].album_artist != tracks[i].artist))
+        {
+            for &index in &indices {
+                backfill_album_credit(&mut tracks[index], named_folder && shared_cover);
+            }
+        }
+        let explicit: BTreeSet<_> = indices
+            .iter()
+            .filter(|&&i| tracks[i].album_artist_missing != Some(true))
+            .map(|&i| tracks[i].album_artist.clone())
+            .collect();
+        let evidence = eligible
+            && (named_folder || shared_cover || indices.iter().any(|&i| tracks[i].compilation));
+        let credit = (evidence && explicit.len() == 1).then(|| explicit.first().unwrap().clone());
+        let infer = evidence && explicit.is_empty() && performers.len() > 1;
+        for index in indices {
+            let track = &mut tracks[index];
+            let missing = track.album_artist_missing == Some(true);
+            track.album_folder =
+                eligible && missing && credit.is_none() && (infer || track.compilation);
+            if missing {
+                track.album_artist = credit.clone().unwrap_or_else(|| {
+                    if infer || track.compilation {
+                        "Various Artists".into()
+                    } else {
+                        track.artist.clone()
+                    }
+                });
+            }
+        }
+    }
 }
 
 fn read_track(path: &Path, cache: &Path, warnings: &mut Vec<String>) -> Track {
@@ -130,6 +279,9 @@ fn read_track(path: &Path, cache: &Path, warnings: &mut Vec<String>) -> Track {
         artist: "Unknown artist".into(),
         album: "Unknown album".into(),
         album_artist: String::new(),
+        album_artist_missing: Some(true),
+        compilation: false,
+        album_folder: false,
         genre: "Unknown genre".into(),
         year: None,
         track_number: None,
@@ -158,10 +310,10 @@ fn read_track(path: &Path, cache: &Path, warnings: &mut Vec<String>) -> Track {
                 if let Some(value) = tag.genre().filter(|v| !v.trim().is_empty()) {
                     track.genre = value.into_owned();
                 }
-                track.album_artist = tag
-                    .get_string(ItemKey::AlbumArtist)
-                    .unwrap_or(&track.artist)
-                    .to_owned();
+                let (credit, missing, compilation) = album_credit(tag, &track.artist);
+                track.album_artist = credit;
+                track.album_artist_missing = Some(missing);
+                track.compilation = compilation;
                 track.year = tag.date().map(|date| u32::from(date.year));
                 track.release_id = tag
                     .get_string(ItemKey::MusicBrainzReleaseId)
@@ -280,6 +432,145 @@ fn cache_cover(bytes: &[u8], cache: &Path) -> std::io::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tagged_wav(path: &Path, artist: &str, album_artist: Option<&str>, compilation: bool) {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&38_u32.to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt ");
+        bytes.extend_from_slice(&16_u32.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&8000_u32.to_le_bytes());
+        bytes.extend_from_slice(&16000_u32.to_le_bytes());
+        bytes.extend_from_slice(&2_u16.to_le_bytes());
+        bytes.extend_from_slice(&16_u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&2_u32.to_le_bytes());
+        bytes.extend_from_slice(&0_u16.to_le_bytes());
+        fs::write(path, bytes).unwrap();
+        let mut tag = lofty::tag::Tag::new(lofty::tag::TagType::Id3v2);
+        tag.set_artist(artist.into());
+        tag.set_album("Soundtrack".into());
+        if compilation {
+            tag.insert_text(ItemKey::FlagCompilation, "1".into());
+        }
+        if let Some(credit) = album_artist {
+            tag.insert_text(ItemKey::AlbumArtist, credit.into());
+        }
+        tag.save_to_path(path, lofty::config::WriteOptions::default())
+            .unwrap();
+    }
+
+    #[test]
+    fn compilation_import_and_legacy_backfill_keep_song_credits() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first.wav");
+        let second = dir.path().join("second.wav");
+        tagged_wav(&first, "Performer One", None, true);
+        tagged_wav(&second, "Performer Two", None, true);
+        let mut scan = scan_paths(&[dir.path().into()], &dir.path().join("cache"));
+        assert!(scan.warnings.is_empty(), "{:?}", scan.warnings);
+        assert_eq!(scan.tracks.len(), 2);
+        assert_eq!(scan.tracks[0].artist, "Performer One");
+        assert_eq!(scan.tracks[1].artist, "Performer Two");
+        for track in &mut scan.tracks {
+            assert_eq!(track.album_artist, "Various Artists");
+            assert_eq!(track.album_artist_missing, Some(true));
+            // Recreate the metadata that older collections saved.
+            track.album_artist = track.artist.clone();
+            track.album_artist_missing = None;
+        }
+        normalize_album_artists(&mut scan.tracks);
+        assert!(
+            scan.tracks
+                .iter()
+                .all(|track| track.album_artist == "Various Artists")
+        );
+        assert!(
+            scan.tracks
+                .iter()
+                .all(|track| track.album_artist_missing == Some(true))
+        );
+    }
+
+    #[test]
+    fn explicit_album_artist_overrides_compilation_flag_and_legacy_inference() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first.wav");
+        let second = dir.path().join("second.wav");
+        tagged_wav(&first, "Performer One", Some("Performer One"), true);
+        tagged_wav(&second, "Performer Two", Some("Performer Two"), true);
+        let mut scan = scan_paths(&[dir.path().into()], &dir.path().join("cache"));
+        for track in &mut scan.tracks {
+            assert_eq!(track.album_artist, track.artist);
+            assert_eq!(track.album_artist_missing, Some(false));
+            track.album_artist_missing = None;
+        }
+        normalize_album_artists(&mut scan.tracks);
+        assert!(
+            scan.tracks
+                .iter()
+                .all(|track| track.album_artist == track.artist)
+        );
+        assert!(
+            scan.tracks
+                .iter()
+                .all(|track| track.album_artist_missing == Some(false))
+        );
+    }
+
+    #[test]
+    fn loose_same_title_imports_need_album_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first.wav");
+        let second = dir.path().join("second.wav");
+        tagged_wav(&first, "Performer One", None, false);
+        tagged_wav(&second, "Performer Two", None, false);
+        let mut tracks = scan_paths(&[dir.path().into()], &dir.path().join("cache")).tracks;
+        assert_eq!(tracks.len(), 2);
+        assert!(
+            tracks
+                .iter()
+                .all(|track| track.album_artist == track.artist && !track.album_folder)
+        );
+        // A shared sleeve supplies evidence; removing it must undo inference.
+        for track in &mut tracks {
+            track.cover = Some("sleeve.cover".into());
+        }
+        normalize_album_artists(&mut tracks);
+        assert!(tracks.iter().all(|track| track.album_folder));
+        tracks[1].cover = None;
+        normalize_album_artists(&mut tracks);
+        assert!(
+            tracks
+                .iter()
+                .all(|track| track.album_artist == track.artist && !track.album_folder)
+        );
+    }
+
+    #[test]
+    fn explicit_various_artists_and_missing_compilation_credit_agree_across_imports() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first.wav");
+        let second = dir.path().join("second.wav");
+        tagged_wav(&first, "Performer One", Some("Various Artists"), false);
+        tagged_wav(&second, "Performer Two", None, true);
+        let cache = dir.path().join("cache");
+        let batch = scan_paths(&[first.clone(), second.clone()], &cache).tracks;
+        let mut incremental = scan_paths(&[first], &cache).tracks;
+        incremental.extend(scan_paths(&[second], &cache).tracks);
+        normalize_album_artists(&mut incremental);
+        assert_eq!(incremental, batch);
+        assert!(
+            batch
+                .iter()
+                .all(|track| track.album_artist == "Various Artists" && !track.album_folder)
+        );
+        assert_eq!(batch[0].album_artist_missing, Some(false));
+        assert_eq!(batch[1].album_artist_missing, Some(true));
+        assert!(batch[1].compilation);
+    }
 
     #[test]
     fn recursive_scan_is_sorted_deduplicated_and_retains_sidecars() {

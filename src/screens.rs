@@ -1,6 +1,8 @@
 use super::*;
 use std::collections::BTreeSet;
+mod bluetooth;
 mod collection;
+mod pairing;
 mod quickplay;
 mod videos;
 pub(crate) use collection::Browser;
@@ -125,7 +127,7 @@ impl Ui {
                 self.track_rows(&list, q, true);
             }
             Page::Album(key) => {
-                let tracks: Vec<_> = self
+                let mut tracks: Vec<_> = self
                     .db
                     .borrow()
                     .tracks
@@ -133,6 +135,7 @@ impl Ui {
                     .filter(|t| album_key(t) == key)
                     .cloned()
                     .collect();
+                sort_album_tracks(&mut tracks);
                 if let Some(t) = tracks.first().cloned() {
                     list.append(&label(&t.album, "section"));
                     let artist = t.album_artist.clone();
@@ -497,9 +500,6 @@ impl Ui {
             .filter(|t| seen.insert(album_key(t)))
             .cloned()
             .collect::<Vec<_>>();
-        self.album_batch(list, Rc::new(albums), 0);
-    }
-    fn album_batch(self: &Rc<Self>, list: &gtk::Box, albums: Rc<Vec<Track>>, offset: usize) {
         let grid = gtk::FlowBox::new();
         grid.set_homogeneous(true);
         grid.set_selection_mode(gtk::SelectionMode::None);
@@ -507,7 +507,64 @@ impl Ui {
         grid.set_column_spacing(6);
         grid.set_max_children_per_line(8);
         grid.set_min_children_per_line(1);
-        for t in albums.iter().skip(offset).take(48) {
+        list.append(&grid);
+        self.album_tiles(&grid, &albums[..albums.len().min(48)]);
+        if albums.len() <= 48 {
+            return;
+        }
+        let scroll = list
+            .ancestor(gtk::ScrolledWindow::static_type())
+            .and_downcast::<gtk::ScrolledWindow>()
+            .unwrap();
+        let albums = Rc::new(albums);
+        let loaded = Rc::new(Cell::new(48));
+        let pending = Rc::new(Cell::new(false));
+        let ui = Rc::downgrade(self);
+        let weak_grid = grid.downgrade();
+        let weak_scroll = scroll.downgrade();
+        // Keep the artist's links and shared releases in the same scrolling page.
+        // Append to one grid so resizing never leaves seams between batches.
+        let reveal = Rc::new(move || {
+            if loaded.get() == albums.len() || pending.replace(true) {
+                return;
+            }
+            let pending = pending.clone();
+            let ui = ui.clone();
+            let weak_grid = weak_grid.clone();
+            let weak_scroll = weak_scroll.clone();
+            let loaded = loaded.clone();
+            let albums = albums.clone();
+            glib::idle_add_local_once(move || {
+                pending.set(false);
+                let (Some(ui), Some(grid), Some(scroll)) =
+                    (ui.upgrade(), weak_grid.upgrade(), weak_scroll.upgrade())
+                else {
+                    return;
+                };
+                if !grid.is_mapped() {
+                    return;
+                }
+                // Use the grid's end, not the whole page: a long footer must
+                // never prevent the next albums from appearing.
+                if grid.compute_bounds(&scroll).is_some_and(|bounds| {
+                    bounds.y() + bounds.height() <= scroll.height() as f32 * 2.0
+                }) {
+                    let end = (loaded.get() + 48).min(albums.len());
+                    ui.album_tiles(&grid, &albums[loaded.get()..end]);
+                    loaded.set(end);
+                }
+            });
+        });
+        let on_scroll = reveal.clone();
+        scroll
+            .vadjustment()
+            .connect_value_changed(move |_| on_scroll());
+        let on_resize = reveal.clone();
+        scroll.vadjustment().connect_changed(move |_| on_resize());
+        grid.connect_map(move |_| reveal());
+    }
+    fn album_tiles(self: &Rc<Self>, grid: &gtk::FlowBox, albums: &[Track]) {
+        for t in albums {
             let k = album_key(t);
             let tile = col(4);
             tile.append(&visual::picture(self.cover(t).as_deref(), 126));
@@ -520,20 +577,10 @@ impl Ui {
             let b = app_button(self, "", move |u| u.go(Page::Album(k.clone())));
             b.add_css_class("tile");
             b.set_child(Some(&tile));
+            let ui = self.clone();
+            let track = t.clone();
+            tile_context_menu(&b, move |tile| ui.quickplay_menu(tile, &track));
             grid.insert(&b, -1);
-        }
-        list.append(&grid);
-        if offset + 48 < albums.len() {
-            let more = gtk::Button::with_label("Show more albums");
-            let u = self.clone();
-            let container = list.downgrade();
-            more.connect_clicked(move |button| {
-                if let Some(container) = container.upgrade() {
-                    container.remove(button);
-                    u.album_batch(&container, albums.clone(), offset + 48);
-                }
-            });
-            list.append(&more);
         }
     }
     fn track_rows(self: &Rc<Self>, list: &gtk::Box, tracks: Vec<Track>, edit: bool) {
@@ -848,6 +895,80 @@ impl Ui {
             }
         }
     }
+    fn sharing_started(self: &Rc<Self>, session: sync::Session) {
+        if let Some(action) = self
+            .win
+            .application()
+            .and_then(|app| app.lookup_action("include-share-videos"))
+        {
+            action
+                .downcast::<gio::SimpleAction>()
+                .expect("stateful sharing action")
+                .set_state(&session.include_video.to_variant());
+        }
+        *self.server.borrow_mut() = Some(session);
+        self.sharing_pending.set(false);
+        self.sharing_retry.set(None);
+        self.sharing_retry_delay.set(5);
+        self.sharing_problem.borrow_mut().take();
+        self.notice("");
+        self.render();
+    }
+    fn sharing_failed(self: &Rc<Self>, error: sync::SharingError) {
+        self.sharing_pending
+            .set(error.waiting || self.sharing_pending.get());
+        self.sharing_retry.set(if error.retryable {
+            let delay = self.sharing_retry_delay.get();
+            self.sharing_retry_delay.set((delay * 2).min(30));
+            Some(Instant::now() + Duration::from_secs(delay))
+        } else {
+            None
+        });
+        *self.sharing_problem.borrow_mut() = Some(error.message.clone());
+        self.notice(&error.message);
+        self.render();
+    }
+    pub(super) fn restore_sharing(self: &Rc<Self>) {
+        if self.protect || self.server.borrow().is_some() {
+            return;
+        }
+        let tx = self.tx.clone();
+        let result = sync::resume(&self.db.borrow(), move |p, t| {
+            let _ = tx.send(Event::Progress(p, t));
+        });
+        match result {
+            Ok(Some(session)) => self.sharing_started(session),
+            Ok(None) => {
+                self.sharing_pending.set(false);
+                self.sharing_retry.set(None);
+                self.sharing_problem.borrow_mut().take();
+                self.render();
+            }
+            Err(error) => self.sharing_failed(error),
+        }
+    }
+    fn stop_sharing(self: &Rc<Self>) {
+        if let Some(action) = self
+            .win
+            .application()
+            .and_then(|app| app.lookup_action("include-share-videos"))
+        {
+            action.change_state(&false.to_variant());
+        }
+        self.sharing_retry.set(None);
+        self.sharing_pending.set(false);
+        self.sharing_retry_delay.set(5);
+        self.sharing_problem.borrow_mut().take();
+        let stopped = sync::stop_remembered();
+        if let Some(session) = self.server.borrow_mut().take() {
+            std::thread::spawn(move || drop(session));
+        }
+        match stopped {
+            Ok(()) => self.notice("Sharing stopped. It will stay off when Gnune reopens."),
+            Err(error) => self.notice(&format!("Sharing stopped for this session, but the saved setting could not be disabled: {error}. It may resume when Gnune reopens.")),
+        }
+        self.render();
+    }
     pub(super) fn share_queue(self: &Rc<Self>) {
         if self.server.borrow().is_some() {
             self.go(Page::Devices);
@@ -863,11 +984,10 @@ impl Ui {
             let _ = tx.send(Event::Progress(p, t));
         }) {
             Ok(s) => {
-                *self.server.borrow_mut() = Some(s);
-                self.notice("");
+                self.sharing_started(s);
                 self.go(Page::Devices)
             }
-            Err(e) => self.notice(&e),
+            Err(e) => self.sharing_failed(e),
         }
     }
     pub(super) fn copy_pairing_link(&self) {
@@ -876,34 +996,152 @@ impl Ui {
             self.notice("Pairing link copied.");
         }
     }
+    pub(super) fn share_library(self: &Rc<Self>) {
+        if self.server.borrow().is_some() {
+            self.notice("Stop sharing first, then choose Share full music library over Wi-Fi. Existing phone permissions will stay unchanged.");
+            self.go(Page::Devices);
+            return;
+        }
+        let tx = self.tx.clone();
+        let include_videos = self
+            .win
+            .application()
+            .and_then(|app| app.lookup_action("include-share-videos"))
+            .and_then(|action| action.state())
+            .and_then(|value| value.get::<bool>())
+            .unwrap_or(false);
+        match sync::start_library(&self.db.borrow(), include_videos, move |p, t| {
+            let _ = tx.send(Event::Progress(p, t));
+        }) {
+            Ok(session) => {
+                self.sharing_started(session);
+                self.go(Page::Devices);
+            }
+            Err(error) => self.sharing_failed(error),
+        }
+    }
     fn devices(self: &Rc<Self>, list: &gtk::Box) {
-        list.append(&label(
-            "Offline playlists for iPhone and Android",
-            "section",
-        ));
-        list.append(&label(
-            "Share the current queue over your local HTTPS connection.",
-            "subtitle",
-        ));
+        let help = |text: &str| {
+            let note = label(text, "subtitle");
+            note.set_ellipsize(gtk::pango::EllipsizeMode::None);
+            note.set_wrap(true);
+            note.set_max_width_chars(80);
+            list.append(&note);
+        };
         if let Some(s) = self.server.borrow().as_ref() {
+            let panel = row(20);
+            panel.set_valign(gtk::Align::Start);
+            list.append(&panel);
+            match pairing::qr(&s.url) {
+                Ok(qr) => panel.append(&qr),
+                Err(_) => {
+                    panel.append(&label("QR unavailable. Use Copy pairing link.", "subtitle"))
+                }
+            }
+            let controls = col(8);
+            controls.set_valign(gtk::Align::Start);
+            controls.set_hexpand(true);
+            panel.append(&controls);
+            controls.append(&label("Scan to pair your phone", "section"));
+            let scope = match s.mode {
+                sync::ShareMode::Queue => format!("Current queue · {} songs", s.track_count),
+                sync::ShareMode::Library => format!(
+                    "Full music library · {} songs{}",
+                    s.track_count,
+                    if s.include_video {
+                        " + collection videos"
+                    } else {
+                        " · music only"
+                    }
+                ),
+            };
+            let scope_label = label(&scope, "track");
+            scope_label.set_ellipsize(gtk::pango::EllipsizeMode::None);
+            scope_label.set_wrap(true);
+            scope_label.set_max_width_chars(28);
+            controls.append(&scope_label);
+            let instructions = label(
+                "On the same Wi-Fi, scan with your phone camera and tap Pair phone.",
+                "subtitle",
+            );
+            instructions.set_ellipsize(gtk::pango::EllipsizeMode::None);
+            instructions.set_wrap(true);
+            instructions.set_max_width_chars(28);
+            controls.append(&instructions);
+            controls.append(&label("Single use · valid for 10 minutes.", "subtitle"));
+            controls.append(&app_button(self, "New pairing QR", |u| {
+                if let Some(session) = u.server.borrow_mut().as_mut() {
+                    session.renew_pairing();
+                }
+                u.render();
+            }));
             let l = label(&s.url, "track");
             l.set_selectable(true);
             l.set_ellipsize(gtk::pango::EllipsizeMode::None);
             l.set_wrap(true);
-            list.append(&l);
+            let link = gtk::Expander::new(Some("Pairing link"));
+            link.set_child(Some(&l));
+            list.append(&link);
             let copy = gtk::Button::with_label("Copy pairing link");
             copy.set_action_name(Some("app.copy-pairing-link"));
-            list.append(&copy);
-            list.append(&app_button(self, "Stop sharing", |u| {
-                if let Some(session) = u.server.borrow_mut().take() {
-                    std::thread::spawn(move || drop(session));
-                }
-                u.render();
+            controls.append(&copy);
+            controls.append(&app_button(self, "Stop sharing", |u| {
+                u.stop_sharing();
             }));
+            if s.skipped > 0 {
+                list.append(&label(
+                    &format!(
+                        "{} unavailable files omitted from this library snapshot.",
+                        s.skipped
+                    ),
+                    "subtitle",
+                ));
+            }
+            help(
+                "Sharing resumes when Gnune reopens, without starting playback. Stop sharing keeps it off. Queue phones keep their exact selection; library phones see the collection permitted by their original music/video choice.",
+            );
         } else {
+            list.append(&bluetooth::panel());
+            list.append(&label("Music on your phone over Wi-Fi", "section"));
+            if let Some(problem) = self.sharing_problem.borrow().as_ref() {
+                let text = label(problem, "subtitle");
+                text.set_wrap(true);
+                list.append(&text);
+                list.append(&app_button(self, "Retry saved sharing", |u| {
+                    u.restore_sharing()
+                }));
+            }
+            if self.sharing_pending.get() {
+                let text = label(
+                    if self.sharing_retry.get().is_some() {
+                        "Waiting for the configured Wi-Fi address. Gnune will retry automatically."
+                    } else {
+                        "Saved sharing is enabled but needs attention. Retry after fixing the connection settings."
+                    },
+                    "subtitle",
+                );
+                text.set_wrap(true);
+                list.append(&text);
+                list.append(&app_button(self, "Stop sharing", |u| u.stop_sharing()));
+            }
+            help(
+                "Share a queue, or explicitly allow a new phone to browse your full music collection and saved playlists. Audio transfers only when it plays.",
+            );
             let pair = gtk::Button::with_label("Pair phone with current queue");
             pair.set_action_name(Some("app.share-queue"));
             list.append(&pair);
+            let videos = gtk::CheckButton::with_label("Include collection videos");
+            videos.set_action_name(Some("app.include-share-videos"));
+            list.append(&videos);
+            let library = gtk::Button::with_label("Share full music library over Wi-Fi");
+            library.set_action_name(Some("app.share-library"));
+            list.append(&library);
+            help(
+                "Choose once: sharing resumes each time Gnune opens, without starting playback. Queue access stays fixed. Full-library access refreshes your collection on restart. Stop sharing keeps access off until you enable it again.",
+            );
+        }
+        if self.server.borrow().is_some() {
+            list.append(&bluetooth::panel());
         }
         let progress = self.db.borrow().phone_progress.clone();
         for (p, n) in progress {
@@ -922,4 +1160,51 @@ fn scroller(child: &gtk::Box) -> gtk::ScrolledWindow {
     s.set_vexpand(true);
     s.set_child(Some(child));
     s
+}
+
+// Capture secondary clicks before GtkWindowHandle can open the window menu.
+// Each tile owns one set of controllers; recycled list items replace the tile.
+fn tile_context_menu(tile: &gtk::Button, popup: impl Fn(&gtk::Button) + 'static) {
+    let popup = Rc::new(popup);
+    let menu = gtk::GestureClick::new();
+    menu.set_button(3);
+    menu.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let show = popup.clone();
+    let weak = tile.downgrade();
+    menu.connect_pressed(move |gesture, _, _, _| {
+        gesture.set_state(gtk::EventSequenceState::Claimed);
+        if let Some(tile) = weak.upgrade() {
+            tile.grab_focus();
+            show(&tile);
+        }
+    });
+    tile.add_controller(menu);
+    let keys = gtk::EventControllerKey::new();
+    keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let weak = tile.downgrade();
+    keys.connect_key_pressed(move |_, key, _, mods| {
+        if (key == gtk::gdk::Key::Menu
+            || (key == gtk::gdk::Key::F10 && mods.contains(gtk::gdk::ModifierType::SHIFT_MASK)))
+            && let Some(tile) = weak.upgrade()
+        {
+            popup(&tile);
+            return glib::Propagation::Stop;
+        }
+        glib::Propagation::Proceed
+    });
+    tile.add_controller(keys);
+    tile.connect_unmap(close_tile_menu);
+}
+
+fn close_tile_menu(tile: &gtk::Button) {
+    let mut child = tile.first_child();
+    while let Some(widget) = child {
+        child = widget.next_sibling();
+        if let Ok(popover) = widget.downcast::<gtk::Popover>() {
+            popover.popdown();
+            if popover.parent().is_some() {
+                popover.unparent();
+            }
+        }
+    }
 }

@@ -12,6 +12,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tarfile
+import tomllib
 import urllib.request
 
 APP_ID = 'org.gnune.Player'
@@ -32,6 +33,7 @@ def main():
     p.add_argument('--skip-rust', action='store_true')
     a = p.parse_args()
     source, work = a.source.resolve(), a.work.resolve()
+    version = tomllib.loads((source / 'Cargo.toml').read_text())['package']['version']
     if os.uname().machine != 'x86_64' or a.jobs < 1:
         p.error('x86_64 and positive --jobs required')
     work.mkdir(parents=True, exist_ok=True)
@@ -56,15 +58,14 @@ def main():
             subprocess.run(command, cwd=cwd, env=env, check=True)
 
     if stage != source:
-        for name in ['src', 'assets', 'data', 'Cargo.toml', 'Cargo.lock', 'build.rs', 'LICENSE', 'README.md']:
+        for name in ['src', 'assets', 'data', 'packaging', 'scripts', 'tests', 'Cargo.toml', 'Cargo.lock', 'build.rs', 'LICENSE', 'README.md', 'RELEASE_NOTES.md']:
             s, d = source / name, stage / name
             if name == 'assets':
                 d.mkdir(parents=True, exist_ok=True)
                 for asset in ['gnune.gresource.xml', 'gnuneIconDraft2.png', 'gnuneIconDraft2.svg']:
                     shutil.copy2(s / asset, d / asset)
-            elif s.is_dir(): shutil.copytree(s, d, dirs_exist_ok=True)
+            elif s.is_dir(): shutil.copytree(s, d, dirs_exist_ok=True, ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
             elif s.exists(): d.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(s, d)
-        shutil.copytree(RECIPE, stage / 'packaging/flatpak', dirs_exist_ok=True, ignore=shutil.ignore_patterns('__pycache__'))
     if not (stage / 'vendor').exists():
         stage.mkdir(exist_ok=True)
         with (work / 'vendor-config.toml').open('w') as f:
@@ -158,9 +159,9 @@ def main():
     # Exact source accompanies every bundled native library/executable and every Rust crate.
     src = prefix / 'share/gnune/sources'; src.mkdir(parents=True, exist_ok=True)
     for item in sources: install(downloads / item['name'], src / item['name'])
-    app_source = src / 'gnune-0.1.0-source.tar.xz'
+    app_source = src / f'gnune-{version}-source.tar.xz'
     with tarfile.open(app_source, 'w:xz') as t:
-        for child in sorted(stage.iterdir()): t.add(child, arcname='gnune-0.1.0/' + child.name)
+        for child in sorted(stage.iterdir()): t.add(child, arcname=f'gnune-{version}/' + child.name)
     # Headers, pkgconfig and archives serve no runtime purpose; retain source above.
     for child in ['include', 'lib/pkgconfig', 'share/man']:
         d = prefix / child
@@ -173,7 +174,7 @@ def main():
         installed = src / item['name']
         if digest(installed) != item['sha256']:
             raise SystemExit('Installed native source changed: ' + item['name'])
-    record = {'app_id': APP_ID, 'version': '0.1.0', 'runtime': 'org.gnome.Platform/x86_64/50',
+    record = {'app_id': APP_ID, 'version': version, 'runtime': 'org.gnome.Platform/x86_64/50',
               'sdk_commit': subprocess.check_output(['flatpak', 'info', '--show-commit', 'org.gnome.Sdk//50'],text=True).strip(),
               'runtime_commit': subprocess.check_output(['flatpak', 'info', '--show-commit', 'org.gnome.Platform//50'],text=True).strip(),
               'sources': sources, 'files': {str(f.relative_to(stage)):digest(f) for f in sorted(stage.rglob('*')) if f.is_file()}}
@@ -184,11 +185,11 @@ def main():
     run('flatpak', 'build-finish', '--command=gnune', '--socket=wayland', '--socket=fallback-x11',
         '--socket=pulseaudio', '--env=GST_PLUGIN_PATH=/app/lib/gstreamer-1.0', '--share=ipc', '--share=network', '--device=dri',
         '--filesystem=xdg-music:ro', '--filesystem=xdg-videos:ro', '--filesystem=xdg-pictures:ro',
-        '--own-name=org.mpris.MediaPlayer2.Gnune', sdk)
+        '--own-name=org.mpris.MediaPlayer2.Gnune', '--system-talk-name=org.bluez', sdk)
     repo = work / 'repo'
     run('flatpak', 'build-export', repo, sdk, 'stable')
     dist = work / 'dist'; dist.mkdir(exist_ok=True)
-    bundle = dist / 'Gnune-0.1.0-x86_64.flatpak'
+    bundle = dist / f'Gnune-{version}-x86_64.flatpak'
     run('flatpak', 'build-bundle', repo, bundle, APP_ID, 'stable', '--runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo')
     (dist / 'SHA256SUMS').write_text(digest(bundle) + '  ' + bundle.name + '\n')
     shutil.copy2(work / 'build-info.json', dist / 'flatpak-build-info.json')

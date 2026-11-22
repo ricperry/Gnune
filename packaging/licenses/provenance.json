@@ -84,5 +84,14 @@
     "file": "README.md",
     "url": "https://raw.githubusercontent.com/r-efi/r-efi/7e1b0322d31d625f81a5656096330934f9cd835d/README.md",
     "sha256": "420f65fec3ba2e89d49da51b222d2881d26959037a7b7d3794143db4bd4627b1"
+  },
+  {
+    "crate": "qrcodegen-1.8.0",
+    "repo": "nayuki/QR-Code-generator",
+    "commit": "720f62bddb7226106071d4728c292cb1df519ceb",
+    "file": "LICENSE-MIT",
+    "url": "https://raw.githubusercontent.com/nayuki/QR-Code-generator/720f62bddb7226106071d4728c292cb1df519ceb/rust/src/lib.rs",
+    "extraction": "Leading license comment; trailing line whitespace normalized.",
+    "sha256": "cb90b790b2b168ffa6ff63f17bcd569974a767ec3cc2844c3bb857ebcc6c7cf4"
   }
 ]

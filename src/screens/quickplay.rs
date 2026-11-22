@@ -138,34 +138,9 @@ impl Ui {
                     u.quickplay_start(&t, action == TileAction::History)
                 }
             });
-            let menu = gtk::GestureClick::new();
-            menu.set_button(3);
             let u = self.clone();
             let t = track.clone();
-            let weak = tile.downgrade();
-            menu.connect_pressed(move |gesture, _, _, _| {
-                if let Some(tile) = weak.upgrade() {
-                    gesture.set_state(gtk::EventSequenceState::Claimed);
-                    u.quickplay_menu(&tile, &t);
-                }
-            });
-            tile.add_controller(menu);
-            let keys = gtk::EventControllerKey::new();
-            let u = self.clone();
-            let t = track.clone();
-            let weak = tile.downgrade();
-            keys.connect_key_pressed(move |_, key, _, mods| {
-                if (key == gtk::gdk::Key::Menu
-                    || (key == gtk::gdk::Key::F10
-                        && mods.contains(gtk::gdk::ModifierType::SHIFT_MASK)))
-                    && let Some(tile) = weak.upgrade()
-                {
-                    u.quickplay_menu(&tile, &t);
-                    return glib::Propagation::Stop;
-                }
-                glib::Propagation::Proceed
-            });
-            tile.add_controller(keys);
+            tile_context_menu(&tile, move |tile| u.quickplay_menu(tile, &t));
             grid.attach(&tile, x, y, span, span);
         }
     }
@@ -180,13 +155,7 @@ impl Ui {
             .filter(|t| album_key(t) == key)
             .cloned()
             .collect();
-        album.sort_by_key(|t| {
-            (
-                t.disc_number.unwrap_or(1),
-                t.track_number.unwrap_or(0),
-                t.title.to_lowercase(),
-            )
-        });
+        sort_album_tracks(&mut album);
         let index = if history {
             album.iter().position(|t| t.path == seed.path).unwrap_or(0)
         } else {
@@ -195,7 +164,8 @@ impl Ui {
         self.start(album, index, None);
     }
 
-    fn quickplay_menu(self: &Rc<Self>, tile: &gtk::Button, track: &Track) {
+    pub(super) fn quickplay_menu(self: &Rc<Self>, tile: &gtk::Button, track: &Track) {
+        close_tile_menu(tile);
         let pop = gtk::Popover::new();
         pop.set_parent(tile);
         let actions = col(2);
@@ -241,7 +211,9 @@ impl Ui {
                     _ => {
                         u.set_album_pinned(&t, !pinned);
                         u.persist();
-                        u.render();
+                        if *u.page.borrow() == Page::Quick {
+                            u.render();
+                        }
                     }
                 }
             });

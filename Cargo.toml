@@ -1,6 +1,6 @@
 [package]
 name = "gnune"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "A Zune-inspired music and video player for Linux"
 license = "GPL-3.0-or-later"
@@ -17,5 +17,7 @@ rand = "0.9"
 roxmltree = "0.21"
 url = "2"
 tiny_http = { version = "0.12", features = ["ssl-openssl"] }
+openssl = "0.10"
 sha2 = "0.10"
 gstreamer = "0.24"
+qrcodegen = "1.8"

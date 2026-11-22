@@ -10,8 +10,9 @@ export FONTCONFIG_PATH="${FONTCONFIG_PATH:-$APPDIR/usr/etc/fonts}"
 export GIO_MODULE_DIR="$APPDIR/usr/lib/gio/modules"
 export GST_PLUGIN_SYSTEM_PATH_1_0="$APPDIR/usr/lib/gstreamer-1.0"
 export GST_PLUGIN_SCANNER_1_0="$APPDIR/usr/libexec/gstreamer-1.0/gst-plugin-scanner"
-# Keep the GStreamer cache separate from the host plugin registry.
-export GST_REGISTRY_1_0="${XDG_CACHE_HOME:-$HOME/.cache}/gnune/gstreamer-appimage-0.1.0.bin"
+# Keep the GStreamer cache separate from the host and earlier AppImage payloads.
+# The packager substitutes the Cargo package version into this template.
+export GST_REGISTRY_1_0="${XDG_CACHE_HOME:-$HOME/.cache}/gnune/gstreamer-appimage-@GNUNE_VERSION@.bin"
 mkdir -p "$(dirname "$GST_REGISTRY_1_0")"
 gnune_loaders=$(mktemp -d "${TMPDIR:-/tmp}/gnune-loaders.XXXXXXXX")
 trap 'rm -rf -- "$gnune_loaders"' EXIT HUP INT TERM

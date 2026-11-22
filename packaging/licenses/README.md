@@ -19,6 +19,9 @@ retrieval URL and SHA-256 for each file. Commits match each crate archive's
 release tags. lofty_attr and ogg_pager use their own published-crate commits,
 which differ from similarly named repository release tags. r-efi publishes its
 license grants and authorship in AUTHORS; preserve that file in full.
+qrcodegen's license is its leading `rust/src/lib.rs` comment, preserved as
+`LICENSE-MIT` with only trailing whitespace normalized; provenance identifies
+the original source and extraction.
 
 The companion dependency source archive carries the complete unmodified crate
 source directories from `cargo vendor --locked --offline --versioned-dirs`,

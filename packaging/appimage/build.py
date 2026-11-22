@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import tomllib
 
 APP_ID = 'org.gnune.Player'
 SDK = 'org.gnome.Sdk//50'
@@ -54,6 +55,7 @@ def main():
     p.add_argument('--appimagetool', type=Path, required=True)
     p.add_argument('--runtime-file', type=Path, required=True)
     args = p.parse_args()
+    version = tomllib.loads((args.root / 'Cargo.toml').read_text())['package']['version']
     if out('uname', '-m') != 'x86_64':
         raise SystemExit('Only x86_64 is supported')
     if sha(args.runtime_file) != 'd30a3ba1388ef57be73faabf606e0d326682f48c87f666106a3c8d6b35b58b4f':
@@ -145,7 +147,7 @@ def main():
             shutil.copytree(source, prefix / folder, dirs_exist_ok=True)
     copy(args.root / 'packaging/licenses/RUST-DEPENDENCIES.md', notice / 'RUST-DEPENDENCIES.md')
     recipe = Path(__file__).resolve().parent
-    copy(recipe / 'AppRun', appdir / 'AppRun')
+    (appdir / 'AppRun').write_text((recipe / 'AppRun').read_text().replace('@GNUNE_VERSION@', version))
     (appdir / 'AppRun').chmod(0o755)
     copy(recipe / (APP_ID + '.desktop'), appdir / (APP_ID + '.desktop'))
     copy(recipe / (APP_ID + '.desktop'), prefix / 'share/applications' / (APP_ID + '.desktop'))
@@ -157,7 +159,7 @@ def main():
         if path.is_file() and path.open('rb').read(4) == b'\x7fELF':
             symbols += out('objdump', '-T', path) + '\n'
     versions = sorted(set(re.findall(r'GLIBC_([\d.]+)', symbols)), key=lambda v:tuple(map(int, v.split('.'))))
-    record = {'version': '0.1.0', 'architecture': 'x86_64', 'minimum_glibc': versions[-1],
+    record = {'version': version, 'architecture': 'x86_64', 'minimum_glibc': versions[-1],
               'sdk': SDK, 'sdk_commit': out('flatpak', 'info', '--show-commit', SDK),
               'platform_commit': out('flatpak', 'info', '--show-commit', 'org.gnome.Platform//50'),
               'system_libraries': sorted(system), 'bundled_libraries': bundled,
@@ -167,8 +169,8 @@ def main():
               'binary_sha256': sha(args.binary), 'appimagetool_sha256': sha(args.appimagetool),
               'runtime_sha256': sha(args.runtime_file),
               'runtime_source': 'https://github.com/AppImage/type2-runtime/commit/caf24f9',
-              'gnune_sources_sha256': {str(p.relative_to(args.root)): sha(p) for name in ['src', 'assets', 'data', 'packaging'] for p in sorted((args.root / name).rglob('*')) if p.is_file() and '__pycache__' not in p.parts and p.name not in {'gnuneIconDraft.png', 'gnuneIconDraft.svg'}},
-              'source_metadata_sha256': {name: sha(args.root / name) for name in ['Cargo.toml', 'Cargo.lock', 'build.rs', 'LICENSE']}}
+              'gnune_sources_sha256': {str(p.relative_to(args.root)): sha(p) for name in ['src', 'assets', 'data', 'packaging', 'scripts', 'tests'] for p in sorted((args.root / name).rglob('*')) if p.is_file() and '__pycache__' not in p.parts and p.suffix != '.pyc' and p.name not in {'gnuneIconDraft.png', 'gnuneIconDraft.svg'}},
+              'source_metadata_sha256': {name: sha(args.root / name) for name in ['Cargo.toml', 'Cargo.lock', 'build.rs', 'LICENSE', 'README.md', 'RELEASE_NOTES.md']}}
     (notice / 'build-provenance.json').write_text(json.dumps(record, indent=2) + '\n')
     args.output.parent.mkdir(parents=True, exist_ok=True)
     run(args.appimagetool, '--no-appstream', '--runtime-file', args.runtime_file, appdir, args.output,

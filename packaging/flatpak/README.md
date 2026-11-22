@@ -1,7 +1,7 @@
 # Build Gnune Flatpak
 
 Install GNOME SDK and Platform 50 (`flatpak install flathub org.gnome.Sdk//50
-org.gnome.Platform//50`), Rust stable and Python 3. Fetch locked Rust crates with
+org.gnome.Platform//50`), Rust stable and Python 3.11 or newer. Fetch locked Rust crates with
 `cargo fetch --locked` once. Then, from the source checkout:
 
 ```sh
@@ -15,8 +15,8 @@ directory for a clean rebuild. The SDK and runtime commit IDs, source hashes,
 corresponding sources accompany the built package. Configure/build logs remain
 in the builder workspace.
 
-The artifact is `target/pkg-work/flatpak/dist/Gnune-0.1.0-x86_64.flatpak`.
-Install with `flatpak install --user ./Gnune-0.1.0-x86_64.flatpak`, then run
+The artifact is `target/pkg-work/flatpak/dist/Gnune-0.2.0-x86_64.flatpak`.
+Install with `flatpak install --user ./Gnune-0.2.0-x86_64.flatpak`, then run
 `flatpak run org.gnune.Player`. Flatpak may prompt to install GNOME Platform 50.
 
 Permissions: Wayland/fallback X11, PulseAudio, direct rendering, shared memory,
@@ -24,7 +24,21 @@ network for metadata, feed downloads and local phone pairing, read-only Music an
 folders for local imports, and read-only Pictures for artwork.
 The file chooser grants access to individually selected files outside those folders.
 Phone pairing requires the computer's firewall/network to allow its chosen port.
+The named `org.bluez` system-bus permission lets Devices read connected-phone status.
 No access to arbitrary home files or removable media is granted by default.
+
+Phone-sharing settings and credentials are separate from a host Cargo/AppImage
+installation. Flatpak's config directory is
+`~/.var/app/org.gnune.Player/config/gnune` and its collection/pairing data is in
+`~/.var/app/org.gnune.Player/data/gnune`. For initial setup, put the literal
+`GNUNE_SYNC_*` assignments described in the main README in
+`config/gnune/phone-sharing/env.sh` under that app directory. Store its certificate
+and private key in that app's config directory and use the absolute paths visible
+there. Protect the private key with owner-only permissions. An external host key
+path is unavailable in the sandbox by default; copying the intended certificate
+and key into the app's private directory avoids a broad home-filesystem grant.
+Choose a sharing mode in Devices to save consent. Re-pair phones when starting a
+new Flatpak collection; host pairings are not imported automatically.
 
 See THIRD_PARTY.md for dependency licensing. Native FFmpeg is built with built-in
 software codecs and Chromaprint, without GPL/nonfree libraries or hardware codecs.

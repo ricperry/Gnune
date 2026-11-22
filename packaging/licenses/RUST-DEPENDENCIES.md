@@ -1,6 +1,6 @@
 # Gnune Rust dependency notices
 
-Cargo.lock SHA-256: `a786529e88eecc03b4a02cfe59e18a0484084d128b0c84f893cd8ad4ab1ec1a0`
+Cargo.lock SHA-256: `835732ad535b54b358618cb9d9e98a4bcc3e8c6ead39173f35b008d9d5f002d8`
 
 This inventory preserves the declared license expressions and shipped license,
 copyright, authorship and notice files for all resolved registry packages,
@@ -114,6 +114,7 @@ Native libraries and external tools have separate notices in each package.
 | ppv-lite86 | 0.2.21 | MIT OR Apache-2.0 |
 | proc-macro-crate | 3.5.0 | MIT OR Apache-2.0 |
 | proc-macro2 | 1.0.107 | MIT OR Apache-2.0 |
+| qrcodegen | 1.8.0 | MIT |
 | quote | 1.0.47 | MIT OR Apache-2.0 |
 | r-efi | 5.3.0 | MIT OR Apache-2.0 OR LGPL-2.1-or-later |
 | r-efi | 6.0.0 | MIT OR Apache-2.0 OR LGPL-2.1-or-later |
@@ -17761,6 +17762,43 @@ CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
+~~~~
+
+## qrcodegen 1.8.0
+
+Declared license: `MIT`
+
+Source: https://crates.io/crates/qrcodegen/1.8.0
+
+Upstream: https://github.com/nayuki/QR-Code-generator
+
+Supplement: https://raw.githubusercontent.com/nayuki/QR-Code-generator/720f62bddb7226106071d4728c292cb1df519ceb/rust/src/lib.rs (SHA-256 `cb90b790b2b168ffa6ff63f17bcd569974a767ec3cc2844c3bb857ebcc6c7cf4`)
+
+### upstream/LICENSE-MIT
+
+~~~~text
+/*
+ * QR Code generator library (Rust)
+ *
+ * Copyright (c) Project Nayuki. (MIT License)
+ * https://www.nayuki.io/page/qr-code-generator-library
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy of
+ * this software and associated documentation files (the "Software"), to deal in
+ * the Software without restriction, including without limitation the rights to
+ * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+ * the Software, and to permit persons to whom the Software is furnished to do so,
+ * subject to the following conditions:
+ * - The above copyright notice and this permission notice shall be included in
+ *   all copies or substantial portions of the Software.
+ * - The Software is provided "as is", without warranty of any kind, express or
+ *   implied, including but not limited to the warranties of merchantability,
+ *   fitness for a particular purpose and noninfringement. In no event shall the
+ *   authors or copyright holders be liable for any claim, damages or other
+ *   liability, whether in an action of contract, tort or otherwise, arising from,
+ *   out of or in connection with the Software or the use or other dealings in the
+ *   Software.
+ */
 ~~~~
 
 ## quote 1.0.47

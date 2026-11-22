@@ -109,6 +109,8 @@ checkbutton check:checked { background:@gn_accent; color:@gn_canvas; }
     background:alpha(@gn_accent,.14); color:@gn_ink;
 }
 .collection-artist-name,.collection-song-title { font-size:13px; }
+.collection-album-grid { background:transparent; color:inherit; }
+.collection-album-grid > child { padding:2px 6px 14px 2px; }
 .collection-album { padding:3px; }
 .collection-album-title { font-size:11px; color:@gn_ink; }
 .collection-album-artist { font-size:10px; color:@gn_muted; }

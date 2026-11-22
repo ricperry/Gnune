@@ -22,10 +22,10 @@ use gnune::{
 };
 use gtk::{gio, glib, prelude::*};
 use rand::seq::SliceRandom;
-use state::{Library, album_key, data_dir};
+use state::{Library, album_key, data_dir, sort_album_tracks};
 use std::{
     cell::{Cell, RefCell},
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     rc::Rc,
     sync::mpsc,
@@ -129,6 +129,10 @@ struct Ui {
     filters: RefCell<String>,
     last_error: RefCell<Option<String>>,
     server: RefCell<Option<sync::Session>>,
+    sharing_pending: Cell<bool>,
+    sharing_retry: Cell<Option<Instant>>,
+    sharing_retry_delay: Cell<u64>,
+    sharing_problem: RefCell<Option<String>>,
     feeds: RefCell<HashMap<String, Vec<media::Episode>>>,
     busy_enrich: Cell<bool>,
     protect: bool,
@@ -427,6 +431,10 @@ fn build(app: &gtk::Application) -> Option<Rc<Ui>> {
         filters: Default::default(),
         last_error: Default::default(),
         server: Default::default(),
+        sharing_pending: Cell::new(false),
+        sharing_retry: Cell::new(None),
+        sharing_retry_delay: Cell::new(5),
+        sharing_problem: Default::default(),
         feeds: Default::default(),
         busy_enrich: Cell::new(false),
         protect,
@@ -556,15 +564,18 @@ fn build(app: &gtk::Application) -> Option<Rc<Ui>> {
         v.toggle_mini();
     });
     opts.append(&u.mini_action);
-    for name in ["share-queue", "copy-pairing-link"] {
+    app.add_action(&gio::SimpleAction::new_stateful(
+        "include-share-videos",
+        None,
+        &false.to_variant(),
+    ));
+    for name in ["share-queue", "share-library", "copy-pairing-link"] {
         let a = gio::SimpleAction::new(name, None);
         let v = u.clone();
-        a.connect_activate(move |_, _| {
-            if name == "share-queue" {
-                v.share_queue()
-            } else {
-                v.copy_pairing_link()
-            }
+        a.connect_activate(move |_, _| match name {
+            "share-queue" => v.share_queue(),
+            "share-library" => v.share_library(),
+            _ => v.copy_pairing_link(),
         });
         app.add_action(&a);
     }
@@ -711,6 +722,9 @@ fn build(app: &gtk::Application) -> Option<Rc<Ui>> {
     mpris::register(&u);
     u.render();
     u.win.present();
+    if !u.protect {
+        u.restore_sharing();
+    }
     u.queue_posters(&u.db.borrow().assets);
     let missing: Vec<_> = {
         let db = u.db.borrow();
@@ -947,6 +961,17 @@ impl Ui {
                 newly_added.append(&mut db.added);
                 db.added = newly_added;
                 db.tracks = by.into_values().collect();
+                db.normalize_album_groups();
+                // An incremental import may complete an existing compilation.
+                // Playback must use the same resolved credits and album keys.
+                tracks = {
+                    let imported: HashSet<_> = tracks.iter().map(|track| &track.path).collect();
+                    db.tracks
+                        .iter()
+                        .filter(|track| imported.contains(&track.path))
+                        .cloned()
+                        .collect()
+                };
                 let compare = |a: &Track, b: &Track| {
                     (
                         &a.album_artist,
@@ -1349,6 +1374,14 @@ impl Ui {
         }
     }
     fn tick(self: &Rc<Self>) {
+        if self
+            .sharing_retry
+            .get()
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            self.sharing_retry.set(None);
+            self.restore_sharing();
+        }
         self.settle_window_mode();
         let compact = self.win.width() > 0 && self.win.width() < 780;
         if self.compact.replace(compact) != compact {

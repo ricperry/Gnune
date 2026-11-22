@@ -1,7 +1,5 @@
 use super::*;
 
-const ALBUM_BATCH: usize = 48;
-
 impl Ui {
     pub(super) fn collection_page(self: &Rc<Self>, tab: &str) {
         let panel = col(12);
@@ -443,80 +441,137 @@ impl Browser {
         self.album_reset.set(Some(&reset));
         heading.append(&reset);
         pane.append(&heading);
-        let list = col(8);
-        pane.append(&scroller(&list));
-        self.album_batch(&list, Rc::new(albums), 0);
+        let model = gio::ListStore::new::<glib::BoxedAnyObject>();
+        for album in albums {
+            model.append(&glib::BoxedAnyObject::new(album));
+        }
+        let factory = gtk::SignalListItemFactory::new();
+        let state = self.clone();
+        factory.connect_bind(move |_, item| {
+            let item = item.downcast_ref::<gtk::ListItem>().unwrap();
+            let album = item.item().and_downcast::<glib::BoxedAnyObject>().unwrap();
+            item.set_child(Some(&state.album_tile(&album.borrow::<Track>())));
+        });
+        factory.connect_unbind(|_, item| {
+            item.downcast_ref::<gtk::ListItem>()
+                .unwrap()
+                .set_child(gtk::Widget::NONE);
+        });
+        // GridView keeps the full scroll range while creating only nearby tiles.
+        let grid = gtk::GridView::new(Some(gtk::NoSelection::new(Some(model))), Some(factory));
+        grid.add_css_class("collection-album-grid");
+        grid.set_min_columns(1);
+        grid.set_max_columns(6);
+        pane.append(&scroll_widget(&grid));
     }
 
-    fn album_batch(self: &Rc<Self>, list: &gtk::Box, albums: Rc<Vec<Track>>, offset: usize) {
-        let grid = gtk::FlowBox::new();
-        grid.set_selection_mode(gtk::SelectionMode::None);
-        grid.set_min_children_per_line(1);
-        grid.set_max_children_per_line(6);
-        grid.set_column_spacing(8);
-        grid.set_row_spacing(12);
-        grid.set_valign(gtk::Align::Start);
-        for t in albums.iter().skip(offset).take(ALBUM_BATCH) {
-            let tile = col(2);
-            tile.set_halign(gtk::Align::Start);
-            let sleeve = gtk::Overlay::new();
-            sleeve.set_size_request(76, 76);
-            sleeve.set_halign(gtk::Align::Start);
-            if self.videos {
-                sleeve.add_overlay(&self.ui.video_poster(&t.path, 76, 76));
+    fn album_tile(self: &Rc<Self>, t: &Track) -> gtk::Button {
+        let tile = col(2);
+        tile.set_halign(gtk::Align::Start);
+        let sleeve = gtk::Overlay::new();
+        sleeve.set_size_request(76, 76);
+        sleeve.set_halign(gtk::Align::Start);
+        if self.videos {
+            sleeve.add_overlay(&self.ui.video_poster(&t.path, 76, 76));
+        } else {
+            sleeve.add_overlay(&visual::picture(self.ui.cover(t).as_deref(), 76));
+        }
+        tile.append(&sleeve);
+        for (text, class) in [
+            (self.album_title(t), "collection-album-title"),
+            (t.album_artist.as_str(), "collection-album-artist"),
+        ] {
+            let name = label(text, class);
+            name.set_width_chars(12);
+            name.set_max_width_chars(12);
+            name.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            tile.append(&name);
+        }
+        let key = self.key(t);
+        let b = gtk::Button::new();
+        b.add_css_class("collection-album");
+        if self.album.borrow().as_ref() == Some(&key) {
+            b.add_css_class("selected");
+        }
+        b.set_child(Some(&tile));
+        b.set_tooltip_text(Some(&format!(
+            "{} — {}",
+            t.album_artist,
+            self.album_title(t)
+        )));
+        let state = self.clone();
+        b.connect_clicked(move |button| {
+            *state.album.borrow_mut() = Some(key.clone());
+            if let Some(pane) = state.albums.upgrade() {
+                clear_album_highlights(&pane);
+            }
+            if let Some(reset) = state.album_reset.upgrade() {
+                reset.set_visible(true);
+            }
+            button.add_css_class("selected");
+            state.render_songs();
+        });
+        let state = self.clone();
+        let track = t.clone();
+        tile_context_menu(&b, move |tile| {
+            if state.videos {
+                state.video_album_menu(tile, &track);
             } else {
-                sleeve.add_overlay(&visual::picture(self.ui.cover(t).as_deref(), 76));
+                state.ui.quickplay_menu(tile, &track);
             }
-            tile.append(&sleeve);
-            for (text, class) in [
-                (self.album_title(t), "collection-album-title"),
-                (t.album_artist.as_str(), "collection-album-artist"),
-            ] {
-                let name = label(text, class);
-                name.set_width_chars(12);
-                name.set_max_width_chars(12);
-                name.set_ellipsize(gtk::pango::EllipsizeMode::End);
-                tile.append(&name);
+        });
+        b
+    }
+
+    fn video_album_menu(self: &Rc<Self>, tile: &gtk::Button, track: &Track) {
+        close_tile_menu(tile);
+        let pop = gtk::Popover::new();
+        pop.set_parent(tile);
+        let actions = col(2);
+        let key = self.key(track);
+        let mut tracks: Vec<_> = self
+            .tracks
+            .iter()
+            .filter(|t| self.key(t) == key)
+            .cloned()
+            .collect();
+        sort_album_tracks(&mut tracks);
+        let paths: Rc<[PathBuf]> = tracks.iter().map(|t| t.path.clone()).collect();
+        let play = gtk::Button::with_label("Play videos");
+        let ui = self.ui.clone();
+        let weak_pop = pop.downgrade();
+        play.connect_clicked(move |_| {
+            if let Some(pop) = weak_pop.upgrade() {
+                pop.popdown();
+                if pop.parent().is_some() {
+                    pop.unparent();
+                }
             }
-            let key = self.key(t);
-            let b = gtk::Button::new();
-            b.add_css_class("collection-album");
-            if self.album.borrow().as_ref() == Some(&key) {
-                b.add_css_class("selected");
+            ui.play_video_playlist(paths.clone(), 0);
+        });
+        actions.append(&play);
+        let show = gtk::Button::with_label("Show videos");
+        let weak_tile = tile.downgrade();
+        let weak_pop = pop.downgrade();
+        show.connect_clicked(move |_| {
+            if let Some(pop) = weak_pop.upgrade() {
+                pop.popdown();
+                if pop.parent().is_some() {
+                    pop.unparent();
+                }
             }
-            b.set_child(Some(&tile));
-            b.set_tooltip_text(Some(&format!(
-                "{} — {}",
-                t.album_artist,
-                self.album_title(t)
-            )));
-            let state = self.clone();
-            b.connect_clicked(move |button| {
-                *state.album.borrow_mut() = Some(key.clone());
-                if let Some(pane) = state.albums.upgrade() {
-                    clear_album_highlights(&pane);
-                }
-                if let Some(reset) = state.album_reset.upgrade() {
-                    reset.set_visible(true);
-                }
-                button.add_css_class("selected");
-                state.render_songs();
-            });
-            grid.insert(&b, -1);
-        }
-        list.append(&grid);
-        if offset + ALBUM_BATCH < albums.len() {
-            let more = gtk::Button::with_label("MORE ALBUMS");
-            let state = self.clone();
-            let weak = list.downgrade();
-            more.connect_clicked(move |button| {
-                if let Some(list) = weak.upgrade() {
-                    list.remove(button);
-                    state.album_batch(&list, albums.clone(), offset + ALBUM_BATCH);
-                }
-            });
-            list.append(&more);
-        }
+            if let Some(tile) = weak_tile.upgrade() {
+                tile.emit_clicked();
+            }
+        });
+        actions.append(&show);
+        pop.set_child(Some(&actions));
+        pop.connect_closed(|pop| {
+            if pop.parent().is_some() {
+                pop.unparent();
+            }
+        });
+        pop.popup();
     }
 
     fn render_songs(self: &Rc<Self>) {
@@ -526,13 +581,7 @@ impl Browser {
         clear(&pane);
         let mut tracks = self.filtered(true);
         if self.album.borrow().is_some() {
-            tracks.sort_by_cached_key(|t| {
-                (
-                    t.disc_number.unwrap_or(1),
-                    t.track_number.unwrap_or(0),
-                    t.title.to_lowercase(),
-                )
-            });
+            sort_album_tracks(&mut tracks);
         } else {
             tracks.sort_by_cached_key(|t| t.title.to_lowercase());
         }

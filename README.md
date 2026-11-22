@@ -13,7 +13,7 @@ Download the x86_64 Flatpak or AppImage from the [GitHub releases](https://githu
 To install the Flatpak for your account, run these commands from the download directory. Flatpak uses the GNOME 50 runtime from Flathub.
 
 ```sh
-flatpak install --user ./Gnune-0.1.0-x86_64.flatpak
+flatpak install --user ./Gnune-0.2.0-x86_64.flatpak
 flatpak run org.gnune.Player
 ```
 
@@ -22,11 +22,11 @@ The Flatpak has its own collection and settings. On first launch, use **Add musi
 The x86_64 AppImage requires glibc 2.39 or newer. To run it directly, make it executable and launch it.
 
 ```sh
-chmod +x Gnune-0.1.0-x86_64.AppImage
-./Gnune-0.1.0-x86_64.AppImage
+chmod +x Gnune-0.2.0-x86_64.AppImage
+./Gnune-0.2.0-x86_64.AppImage
 ```
 
-Each release includes `SHA256SUMS`. Download it alongside your package and run `sha256sum --check --ignore-missing SHA256SUMS` to verify the download. Package build instructions are available for [Flatpak](packaging/flatpak/README.md) and [AppImage](packaging/appimage/README.md).
+Each release includes `SHA256SUMS`. Download it alongside your package and run `sha256sum --check --ignore-missing SHA256SUMS` to verify the download. See the [release notes](RELEASE_NOTES.md) for changes and limits. Package build instructions are available for [Flatpak](packaging/flatpak/README.md) and [AppImage](packaging/appimage/README.md).
 
 ## Build from source
 
@@ -43,6 +43,10 @@ cargo run --locked -- "/path/to/an album"
 If GTK reports **Unable to connect to the accessibility bus** with **Connection refused** on Fedora, `systemctl --user restart at-spi-dbus-bus.service` restarts the user’s AT-SPI service. Relaunch Gnune so GTK can discover the current bus address.
 
 Use **Add music folder** on an empty collection or the **+** by Settings to import a folder. Choose **Settings → Open file** to play a track. Gnune reads embedded tags, including disc and track numbers. It looks for embedded artwork and for images named `cover`, `folder`, `front`, `album`, or `albumart` beside the tracks. Select an artist to narrow the album and song panes. Select a sleeve to see the album’s tracks, then **Album details → Choose cover** to assign your own artwork. **All artists** and the album pane’s **All** clear the respective filters.
+
+Album tiles appear automatically as you scroll in Collection and artist pages. Right-click a music album, or focus it and press **Menu** or **Shift+F10**, for playback, details, Smart DJ and Quickplay pin actions.
+
+Compilation flags, album-named folders and shared sleeves keep uncredited compilations together as **Various Artists**. Explicit album credits and individual song credits are preserved. Numbered CD/Disc folders share their release. Existing collections update on opening without reimporting, while separate releases remain distinct.
 
 The desktop and phone icons use the updated Gnune mark in `assets/`. The desktop binary embeds the PNG artwork. To give GNOME its launcher entry and icon for a local Cargo installation, run the following from the project root with `~/.cargo/bin` on your desktop session’s PATH.
 
@@ -102,9 +106,19 @@ Review a match with **Use selected match**, adjust any fields, then choose **Sav
 
 AcoustID is ready to use with Gnune’s registered application key, and **My music collection** remains the default method. Under **Recognition service keys**, enter your AudD token or an optional AcoustID override, then use **Remember keys on this computer** to save your entries under `$XDG_CONFIG_HOME/gnune`. Nonblank `GNUNE_ACOUSTID_KEY` and `GNUNE_AUDD_TOKEN` environment variables take precedence over those entries. AcoustID falls back to Gnune’s built-in key when neither override is set. Online identification uses the first audio stream and runs only when you select an online method and submit a lookup.
 
-## Offline phone playback
+## Phone collection and playback
 
-The Devices view shares a snapshot of the current queue with an installable web player. Set a stable HTTPS origin, a matching certificate chain trusted by the phones, its private key, and a LAN bind address before launching Gnune. Substitute values for your network.
+Devices shows connected-phone status from Fedora's BlueZ service. Bluetooth is separate from Gnune's opt-in Wi-Fi/HTTPS companion; connect phones in GNOME Settings → Bluetooth.
+
+Choose the access you want in **Devices**:
+
+- **Pair phone with current queue** grants only the selected music queue. An existing queue pairing never gains the rest of your collection.
+- **Share full music library over Wi-Fi** separately enables music browsing and your saved music playlists, even without a desktop playback queue. Unavailable files are omitted. Existing full-library pairings see the current music collection when this mode starts again; their cache namespace and listening progress stay stable. Stop and restart sharing after importing or editing the library to refresh its snapshot.
+- **Include collection videos** is a separate, initially unchecked option for full-library sharing. A phone must pair with a video-enabled QR to gain that capability. Music-only phones never silently gain videos. Video playlists preserve their desktop order; photos and other assets are excluded.
+
+A library pairing can connect only while full-library sharing is enabled. Video additionally requires both its original grant and the active desktop session to permit video. Choose the scope once: Gnune remembers that consent and resumes sharing each time the desktop app opens, without starting desktop playback. Queue sharing retains the exact selected files; full-library sharing refreshes from the loaded collection on restart. The app waits and retries if its configured Wi-Fi address is temporarily unavailable. **Devices → Stop sharing** cancels waiting and keeps sharing off across restarts until you enable it again. **Retry saved sharing** retries after fixing TLS or connection settings. Existing queue pairings retain only their original selection, even under a full-library listener. Gnune does not sync the iPhone Music library or import files from your phone.
+
+Set a stable HTTPS origin, a certificate chain trusted by the phone, its private key and a LAN bind address before launching Gnune. Substitute values for your network; keep the key on the desktop.
 
 ```sh
 export GNUNE_SYNC_BIND=192.168.1.20:8443
@@ -114,10 +128,22 @@ export GNUNE_SYNC_KEY=/path/to/server-key.pem
 cargo run --locked
 ```
 
-1. On the desktop, play the album or playlist you want to take with you. Open **Devices → Pair phone with current queue**.
-2. Open the configured HTTPS origin on the phone. On iPhone, add it to the Home Screen and open the installed app before downloading. Paste the single-use pairing code from the desktop link. Keep the private key on the desktop.
-3. Download the queue while connected. Reopen the player in airplane mode to check the downloaded tracks. Codec support and available browser storage depend on the phone.
-4. Reconnect to the desktop while sharing is active and open the companion to sync listening progress. Select the resume entry in **Devices**. **Stop sharing** closes the listener. Existing pairings retain access to their original selection when sharing is enabled again. Use **Unpair phone** in the companion to revoke its credential.
+The first enabled session saves its connection settings and scope under `$XDG_CONFIG_HOME/gnune/sharing.json`, so normal desktop launches can reconnect without exporting variables again. Environment variables override the saved fields. For initial setup, Gnune also accepts literal `GNUNE_SYNC_*` assignments in `$XDG_CONFIG_HOME/gnune/phone-sharing/env.sh`; it never executes that file or expands shell expressions. PEM private-key contents and phone credentials are not copied into the sharing settings. Certificate parsing and the key match are checked before remembering consent to wait for an unavailable address; certificate trust and hostname acceptance remain the phone’s responsibility. Keep the configured address/origin stable. Gnune does not start at login or keep a listener running after the desktop app exits.
+
+1. Choose a sharing mode in desktop **Devices**. On the same Wi-Fi, scan its QR with your phone camera, open the link in Safari or your browser, then tap **Pair phone**. No copying or typing is needed. QR generation is local. **Copy pairing link** and the phone’s manual disclosure remain available. Each code works once for ten minutes; **New pairing QR** renews it without revoking paired phones.
+2. Browse **artists**, **albums**, **songs** and **playlists**, drill into an artist or album, search and use **back**. **videos** and **video playlists** appear for a video-enabled library pairing. A visible player and **up next** retain your playback context. Play and shuffle use the current album, playlist or song list; playlist repeats and ordering are preserved.
+3. Tap a song to play. Only the song that becomes current transfers; browsing, adding to up next and selecting a playlist do not fetch audio. There is no next-song prefetch or bulk playlist download. Played songs are saved in this browser when storage allows; the **on phone** filter finds them. Previously downloaded queues still work. **Remove saved audio** clears local audio while keeping pairing and listening progress.
+4. Wait for offline-player readiness and test saved songs by reopening in airplane mode. Reconnect to desktop Wi-Fi to return music listening progress; select a resume entry in desktop **Devices**. Codec support and available browser storage depend on the phone. Native video streams only on deliberate playback, supports byte-range seeking and does not download into offline storage. Your phone must support the original codec; H.264/AAC MP4 is widely supported.
+
+Pairing stays in this browser across sessions. Foregrounding the player or reconnecting Wi-Fi retries credential recovery, catalog refresh and progress sync without starting playback. Home Screen installation is optional. After pairing in Safari, use **Share → Add to Home Screen**; Android offers **Install app**. On iOS/iPadOS 17.2 and later, a newly created Home Screen app can inherit Safari’s login cookie and recover the same scoped pairing online. IndexedDB audio and progress are separate between contexts. Existing Home Screen apps without a credential or copied cookie must pair once inside that context. The host-only, HttpOnly, Secure recovery cookie uses only `/api/resume`; the server stores only the credential digest. **Unpair phone** revokes that grant in all contexts and clears saved media in the current one. [WebKit cookie handoff behavior](https://webkit.org/blog/14787/webkit-features-in-safari-17-2/#login-cookies)
+
+To switch an already installed Home Screen app from a queue pairing to your full collection, stop desktop sharing, choose **Share full music library over Wi-Fi** (and the separate video option if wanted), then copy its new pairing link. In the existing phone app, open **connection & storage → Change pairing**, paste the link and tap **Pair phone**. **Keep current pairing** cancels, including after an empty or invalid entry. The old pairing remains active until the new link succeeds; saved audio and pending progress are retained under their original scope. You do not need to unpair, clear storage or create another Home Screen icon.
+
+Open while connected to check for companion updates, then close all Gnune tabs and reopen to activate a waiting update. The offline shell updates together without removing pairings, played songs or pending progress. Artwork comes only from your local collection, through an authenticated, size-limited endpoint, with a bounded phone artwork cache.
+
+If the phone cannot open a QR link, confirm the hostname resolves there, the certificate is trusted and the LAN bind address and port are reachable through Fedora’s firewall. QR scanning does not configure DNS, certificates or firewall rules. Offline-shell setup is separate from online pairing. A revoked pairing is identified separately from an unavailable desktop; saved songs remain usable locally.
+
+For an existing Tailscale setup, `python3 scripts/gnune-tailscale-route.py --host LAN_IP --phone PHONE_TAILSCALE_IP` previews advertising only this computer's LAN address as a `/32` route. Run the helper on the host from the source checkout. Review its printed tailnet policy and route-approval instructions before repeating with `--apply`; `--remove --apply` withdraws that exact route. It preserves other advertised routes and exit-node settings, and does not configure certificates, Gnune, forwarding or firewall rules. Existing broad tailnet grants can still permit access. Keeping the same HTTPS origin preserves an existing phone pairing.
 
 ## Local data and verification
 
@@ -131,6 +157,8 @@ cargo test --locked
 ```
 
 The playback tests run mpv with null audio and require permission to open a private Unix socket. For isolated desktop checks, set `GNUNE_AUDIO_NULL=1` and use a temporary `XDG_DATA_HOME`. Export a separate, mode-0700 `XDG_RUNTIME_DIR` **before** starting a private `dbus-run-session` and compositor so activated services, including AT-SPI, use their own sockets. Physical phone acceptance requires an offline reopen, local playback, and a progress round trip on each device.
+
+Run `node tests/mobile-pairing.cjs` and `node tests/mobile-catalog.cjs` for companion pairing, resume, fetch-on-play, navigation, grouping, playlist ordering and offline-start regressions. These use simulated browser storage and requests; they do not establish Safari or physical-phone acceptance.
 
 ## License
 

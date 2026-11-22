@@ -31,6 +31,33 @@ pub struct Library {
     pub current: Option<PathBuf>,
 }
 impl Library {
+    pub fn normalize_album_groups(&mut self) {
+        if self.covers.is_empty() {
+            gnune::library::normalize_album_artists(&mut self.tracks);
+            return;
+        }
+        let previous: Vec<_> = self.tracks.iter().map(album_key).collect();
+        gnune::library::normalize_album_artists(&mut self.tracks);
+        let mut ordered: Vec<_> = self.tracks.iter().zip(previous).collect();
+        ordered.sort_by(|(a, _), (b, _)| a.path.cmp(&b.path));
+        for (track, old_key) in ordered {
+            let key = album_key(track);
+            let legacy_key = serde_json::to_string(&(&track.artist, &track.album)).unwrap();
+            if let Some(cover) = self
+                .covers
+                .get(&old_key)
+                .or_else(|| {
+                    (track.album_artist_missing == Some(true))
+                        .then(|| self.covers.get(&legacy_key))
+                        .flatten()
+                })
+                .cloned()
+            {
+                // Preserve the old entry too: another release may still use it.
+                self.covers.entry(key).or_insert(cover);
+            }
+        }
+    }
     pub fn add_video_to_playlist(&mut self, name: String, path: PathBuf) {
         let paths = self.video_playlists.entry(name).or_default();
         if !paths.contains(&path) {
@@ -127,7 +154,12 @@ fn save(root: &Path, db: &Library) -> io::Result<()> {
 pub fn load() -> Result<Library, String> {
     let p = data_dir().join("collection.json");
     match fs::read(&p) {
-        Ok(b) => serde_json::from_slice(&b).map_err(|e| format!("Reading {}: {e}", p.display())),
+        Ok(b) => {
+            let mut db: Library =
+                serde_json::from_slice(&b).map_err(|e| format!("Reading {}: {e}", p.display()))?;
+            db.normalize_album_groups();
+            Ok(db)
+        }
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Library::default()),
         Err(e) => Err(e.to_string()),
     }
@@ -142,8 +174,25 @@ pub fn album_key(t: &Track) -> String {
             t.path.parent().unwrap_or(Path::new("")).display()
         );
     }
+    if t.album_folder {
+        return format!(
+            "compilation/{}",
+            serde_json::to_string(&(gnune::library::album_directory(&t.path), &t.album)).unwrap()
+        );
+    }
     serde_json::to_string(&(&t.album_artist, &t.album)).unwrap()
 }
+pub fn sort_album_tracks(tracks: &mut [Track]) {
+    tracks.sort_by_cached_key(|track| {
+        (
+            track.disc_number.unwrap_or(1),
+            track.track_number.unwrap_or(0),
+            track.title.to_lowercase(),
+            track.path.clone(),
+        )
+    });
+}
+
 pub fn promote(items: &mut Vec<PathBuf>, path: &Path) {
     items.retain(|x| x != path);
     items.insert(0, path.into());
@@ -213,6 +262,271 @@ pub fn lines(text: &str) -> Vec<Line> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn legacy_compilation(folder: &str) -> Vec<Track> {
+        ["Performer One", "Performer Two"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, artist)| Track {
+                path: PathBuf::from(folder).join(format!("{index}.m4a")),
+                title: format!("Song {index}"),
+                artist: artist.into(),
+                album_artist: artist.into(),
+                album: "Soundtrack".into(),
+                cover: Some("cached-sleeve.cover".into()),
+                year: Some(2000 + index as u32),
+                track_number: Some(1 + index as u32),
+                ..Track::default()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn legacy_compilations_merge_offline_without_losing_saved_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let tracks = legacy_compilation(dir.path().join("Soundtrack").to_str().unwrap());
+        let old_key = album_key(&tracks[1]);
+        let paths: Vec<_> = tracks.iter().map(|track| track.path.clone()).collect();
+        let mut db = Library {
+            tracks,
+            pins: vec![paths[1].clone()],
+            history: vec![paths[0].clone()],
+            playlists: BTreeMap::from([("Road trip".into(), paths.clone())]),
+            covers: BTreeMap::from([(old_key.clone(), "chosen-cover.png".into())]),
+            ..Library::default()
+        };
+        // Old JSON has no provenance field and remains readable.
+        let mut json = serde_json::to_value(&db).unwrap();
+        for track in json["tracks"].as_array_mut().unwrap() {
+            track
+                .as_object_mut()
+                .unwrap()
+                .remove("album_artist_missing");
+        }
+        db = serde_json::from_value(json).unwrap();
+        let original = db.tracks.clone();
+        db.normalize_album_groups();
+        let key = album_key(&db.tracks[0]);
+        assert_eq!(key, album_key(&db.tracks[1]));
+        assert!(key.starts_with("compilation/"));
+        assert_eq!(db.covers[&key], PathBuf::from("chosen-cover.png"));
+        assert!(db.covers.contains_key(&old_key));
+        assert_eq!(db.pins, [paths[1].clone()]);
+        assert_eq!(db.history, [paths[0].clone()]);
+        assert_eq!(db.playlists["Road trip"], paths);
+        for (track, before) in db.tracks.iter().zip(&original) {
+            assert_eq!(track.album_artist, "Various Artists");
+            assert_eq!(track.artist, before.artist);
+            assert_eq!(track.path, before.path);
+            assert_eq!(track.title, before.title);
+            assert_eq!(track.year, before.year);
+            assert_eq!(track.track_number, before.track_number);
+        }
+        let normalized = serde_json::to_value(&db).unwrap();
+        db.normalize_album_groups();
+        assert_eq!(serde_json::to_value(&db).unwrap(), normalized);
+    }
+
+    #[test]
+    fn compilation_identity_keeps_distinct_folders_and_release_ids_separate() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = Library::default();
+        for edition in ["Original", "Deluxe"] {
+            db.tracks.extend(legacy_compilation(
+                dir.path()
+                    .join(edition)
+                    .join("Soundtrack")
+                    .to_str()
+                    .unwrap(),
+            ));
+        }
+        db.normalize_album_groups();
+        assert_eq!(album_key(&db.tracks[0]), album_key(&db.tracks[1]));
+        assert_eq!(album_key(&db.tracks[2]), album_key(&db.tracks[3]));
+        assert_ne!(album_key(&db.tracks[0]), album_key(&db.tracks[2]));
+        db.tracks[0].release_id = Some("release-one".into());
+        db.tracks[1].release_id = Some("release-two".into());
+        assert_ne!(album_key(&db.tracks[0]), album_key(&db.tracks[1]));
+        db.tracks[2].release_id = Some("release-one".into());
+        assert_eq!(album_key(&db.tracks[0]), album_key(&db.tracks[2]));
+    }
+
+    #[test]
+    fn mixed_explicit_compilation_credits_and_cover_migration_are_deterministic() {
+        let mut tracks = legacy_compilation("/music/Soundtrack");
+        tracks[0].album_artist = "Various Artists".into();
+        tracks[0].album_artist_missing = Some(false);
+        tracks[1].album_artist_missing = Some(true);
+        tracks[1].compilation = true;
+        let mut db = Library {
+            tracks,
+            ..Library::default()
+        };
+        db.normalize_album_groups();
+        assert_eq!(album_key(&db.tracks[0]), album_key(&db.tracks[1]));
+        assert_eq!(db.tracks[0].album_artist_missing, Some(false));
+
+        let dir = tempfile::tempdir().unwrap();
+        let tracks = legacy_compilation(dir.path().join("Soundtrack").to_str().unwrap());
+        let covers = BTreeMap::from([
+            (album_key(&tracks[0]), "first-cover.png".into()),
+            (album_key(&tracks[1]), "second-cover.png".into()),
+        ]);
+        let mut forward = Library {
+            tracks: tracks.clone(),
+            covers: covers.clone(),
+            ..Library::default()
+        };
+        let mut reversed = Library {
+            tracks: tracks.into_iter().rev().collect(),
+            covers,
+            ..Library::default()
+        };
+        forward.normalize_album_groups();
+        reversed.normalize_album_groups();
+        assert_eq!(forward.covers, reversed.covers);
+        assert_eq!(
+            forward.covers[&album_key(&forward.tracks[0])],
+            PathBuf::from("first-cover.png")
+        );
+    }
+
+    #[test]
+    fn album_order_uses_disc_then_track_independent_of_saved_artist_order() {
+        let mut tracks: Vec<_> = [(2, 1), (1, 11), (1, 5), (1, 2)]
+            .into_iter()
+            .map(|(disc, number)| Track {
+                disc_number: Some(disc),
+                track_number: Some(number),
+                ..Track::default()
+            })
+            .collect();
+        sort_album_tracks(&mut tracks);
+        assert_eq!(
+            tracks
+                .iter()
+                .map(|track| (track.disc_number.unwrap(), track.track_number.unwrap()))
+                .collect::<Vec<_>>(),
+            [(1, 2), (1, 5), (1, 11), (2, 1)]
+        );
+    }
+
+    #[test]
+    fn numbered_compilation_discs_share_the_release_directory_and_key() {
+        let mut tracks = legacy_compilation("/music/Soundtrack");
+        for (index, track) in tracks.iter_mut().enumerate() {
+            track.path = PathBuf::from(format!(
+                "/music/Soundtrack/{}/song.m4a",
+                if index == 0 { "CD1" } else { "Disc 2" }
+            ));
+            track.artist = "Band".into();
+            track.album_artist = "Band".into();
+            track.album_artist_missing = Some(true);
+            track.compilation = true;
+        }
+        let mut db = Library {
+            tracks,
+            ..Library::default()
+        };
+        db.normalize_album_groups();
+        assert_eq!(album_key(&db.tracks[0]), album_key(&db.tracks[1]));
+        assert_eq!(
+            gnune::library::album_directory(&db.tracks[0].path),
+            Path::new("/music/Soundtrack")
+        );
+        assert_eq!(
+            gnune::library::album_directory(Path::new("/music/Soundtrack/Discography/song.m4a")),
+            Path::new("/music/Soundtrack/Discography")
+        );
+        assert!(
+            db.tracks
+                .iter()
+                .all(|track| track.album_artist == "Various Artists")
+        );
+    }
+
+    #[test]
+    fn one_explicit_album_credit_reconciles_missing_credits_but_conflicts_stay_split() {
+        let mut tracks = legacy_compilation("/music/Soundtrack");
+        tracks[0].album_artist = "House Band".into();
+        tracks[0].album_artist_missing = Some(false);
+        tracks[1].album_artist_missing = Some(true);
+        let original = tracks.clone();
+        let mut batch = Library {
+            tracks,
+            ..Library::default()
+        };
+        batch.normalize_album_groups();
+        assert_eq!(album_key(&batch.tracks[0]), album_key(&batch.tracks[1]));
+        assert_eq!(batch.tracks[1].album_artist, "House Band");
+        let mut incremental = Library {
+            tracks: vec![original[1].clone()],
+            ..Library::default()
+        };
+        incremental.normalize_album_groups();
+        incremental.tracks.insert(0, original[0].clone());
+        incremental.normalize_album_groups();
+        assert_eq!(incremental.tracks, batch.tracks);
+        let mut conflict = original[0].clone();
+        conflict.path = "/music/Soundtrack/third.m4a".into();
+        conflict.album_artist = "Other Band".into();
+        incremental.tracks.push(conflict);
+        incremental.normalize_album_groups();
+        assert_eq!(incremental.tracks[1].album_artist, "Performer Two");
+        let keys: std::collections::BTreeSet<_> =
+            incremental.tracks.iter().map(album_key).collect();
+        assert_eq!(keys.len(), 3);
+    }
+
+    #[test]
+    fn ordinary_multi_disc_albums_keep_the_existing_identity() {
+        let mut tracks = legacy_compilation("/music/Soundtrack");
+        for (index, track) in tracks.iter_mut().enumerate() {
+            track.artist = "Band".into();
+            track.album_artist = "Band".into();
+            track.path = PathBuf::from(format!("/music/Soundtrack/Disc {index}/song.flac"));
+        }
+        tracks[1].album_artist_missing = Some(true); // A newly imported second disc.
+        let expected = album_key(&tracks[0]);
+        gnune::library::normalize_album_artists(&mut tracks);
+        assert_eq!(album_key(&tracks[0]), expected);
+        assert_eq!(album_key(&tracks[1]), expected);
+        assert_eq!(tracks[0].album_artist, "Band");
+    }
+
+    #[test]
+    fn incremental_imports_resolve_compilation_members_and_keep_custom_covers() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut tracks = legacy_compilation(dir.path().join("Soundtrack").to_str().unwrap());
+        tracks[0].album_artist_missing = Some(true);
+        tracks[1].album_artist_missing = Some(true);
+        let mut db = Library {
+            covers: BTreeMap::from([(album_key(&tracks[0]), "chosen-cover.png".into())]),
+            tracks: vec![tracks.remove(0)],
+            ..Library::default()
+        };
+        db.normalize_album_groups();
+        assert_eq!(db.tracks[0].album_artist, "Performer One");
+        db.tracks.extend(tracks);
+        db.normalize_album_groups();
+        let key = album_key(&db.tracks[0]);
+        assert_eq!(key, album_key(&db.tracks[1]));
+        assert_eq!(db.covers[&key], PathBuf::from("chosen-cover.png"));
+    }
+
+    #[test]
+    fn offline_loose_tracks_are_not_guessed_to_be_a_compilation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut tracks = legacy_compilation(dir.path().join("Loose tracks").to_str().unwrap());
+        let keys: Vec<_> = tracks.iter().map(album_key).collect();
+        gnune::library::normalize_album_artists(&mut tracks);
+        assert_eq!(tracks.iter().map(album_key).collect::<Vec<_>>(), keys);
+        assert!(
+            tracks
+                .iter()
+                .all(|track| track.album_artist_missing.is_none())
+        );
+    }
     #[test]
     fn explicit_save_follows_pending_playback_updates() {
         let dir = tempfile::tempdir().unwrap();

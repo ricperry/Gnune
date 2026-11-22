@@ -18,6 +18,13 @@
   <url type="bugtracker">https://github.com/ricperry/Gnune/issues</url>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.2.0" date="2026-11-22">
+      <description>
+        <p>Browse and play your music collection on a paired phone, with optional
+        video sharing, local pairing QR codes and remembered sharing settings.</p>
+        <p>Improves compilation grouping, collection browsing and phone recovery.</p>
+      </description>
+    </release>
     <release version="0.1.0" date="2026-11-21"/>
   </releases>
 </component>
