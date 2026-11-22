@@ -6,7 +6,29 @@ With an existing music library, Gnune opens on Quickplay, with sleeves for pins,
 
 The desktop reference shows the collection at 2:00 and the artwork, diagonal typography and queue that inspired Artist Showcase at 2:40. [Collection in the Zune tutorial](https://www.youtube.com/watch?v=A1iqtznwpCA&t=120s) · [Now Playing in the same recording](https://www.youtube.com/watch?v=A1iqtznwpCA&t=160s)
 
-## Run
+## Install on Linux
+
+Download the x86_64 Flatpak or AppImage from the [GitHub releases](https://github.com/ricperry/Gnune/releases/latest).
+
+To install the Flatpak for your account, run these commands from the download directory. Flatpak uses the GNOME 50 runtime from Flathub.
+
+```sh
+flatpak install --user ./Gnune-0.1.0-x86_64.flatpak
+flatpak run org.gnune.Player
+```
+
+The Flatpak has its own collection and settings. On first launch, use **Add music folder** to select your library, including a folder on an external drive.
+
+The x86_64 AppImage requires glibc 2.39 or newer. To run it directly, make it executable and launch it.
+
+```sh
+chmod +x Gnune-0.1.0-x86_64.AppImage
+./Gnune-0.1.0-x86_64.AppImage
+```
+
+Each release includes `SHA256SUMS`. Download it alongside your package and run `sha256sum --check --ignore-missing SHA256SUMS` to verify the download. Package build instructions are available for [Flatpak](packaging/flatpak/README.md) and [AppImage](packaging/appimage/README.md).
+
+## Build from source
 
 Build with stable Rust and GTK 4.14 or newer. On Fedora, install the native build dependencies and run Gnune from the checkout.
 

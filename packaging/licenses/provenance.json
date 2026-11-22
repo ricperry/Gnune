@@ -1,0 +1,88 @@
+[
+  {
+    "crate": "ogg_pager-0.7.2",
+    "repo": "Serial-ATA/lofty-rs",
+    "commit": "76ff7093a1f6a98c60297de4695709d04c8c1f47",
+    "file": "LICENSE-APACHE",
+    "url": "https://raw.githubusercontent.com/Serial-ATA/lofty-rs/76ff7093a1f6a98c60297de4695709d04c8c1f47/LICENSE-APACHE",
+    "sha256": "33ee463a651c2dd0417e68e97d97c811c7bb19280c2116bff9906fe8d2718551"
+  },
+  {
+    "crate": "ogg_pager-0.7.2",
+    "repo": "Serial-ATA/lofty-rs",
+    "commit": "76ff7093a1f6a98c60297de4695709d04c8c1f47",
+    "file": "LICENSE-MIT",
+    "url": "https://raw.githubusercontent.com/Serial-ATA/lofty-rs/76ff7093a1f6a98c60297de4695709d04c8c1f47/LICENSE-MIT",
+    "sha256": "0884e92e74c08412d08bb7cbd121e3c09cbf2ae357972440b06f81b3305b0176"
+  },
+  {
+    "crate": "lofty_attr-0.13.0",
+    "repo": "Serial-ATA/lofty-rs",
+    "commit": "5affdd9aea68e7b06d5e1a651bec7814882f44c7",
+    "file": "LICENSE-APACHE",
+    "url": "https://raw.githubusercontent.com/Serial-ATA/lofty-rs/5affdd9aea68e7b06d5e1a651bec7814882f44c7/LICENSE-APACHE",
+    "sha256": "33ee463a651c2dd0417e68e97d97c811c7bb19280c2116bff9906fe8d2718551"
+  },
+  {
+    "crate": "lofty_attr-0.13.0",
+    "repo": "Serial-ATA/lofty-rs",
+    "commit": "5affdd9aea68e7b06d5e1a651bec7814882f44c7",
+    "file": "LICENSE-MIT",
+    "url": "https://raw.githubusercontent.com/Serial-ATA/lofty-rs/5affdd9aea68e7b06d5e1a651bec7814882f44c7/LICENSE-MIT",
+    "sha256": "0884e92e74c08412d08bb7cbd121e3c09cbf2ae357972440b06f81b3305b0176"
+  },
+  {
+    "crate": "lofty-0.25.4",
+    "repo": "Serial-ATA/lofty-rs",
+    "commit": "618731cee7aac784f5f08643bd5d8d005f3c01d6",
+    "file": "LICENSE-APACHE",
+    "url": "https://raw.githubusercontent.com/Serial-ATA/lofty-rs/618731cee7aac784f5f08643bd5d8d005f3c01d6/LICENSE-APACHE",
+    "sha256": "33ee463a651c2dd0417e68e97d97c811c7bb19280c2116bff9906fe8d2718551",
+    "tag": "0.25.4"
+  },
+  {
+    "crate": "lofty-0.25.4",
+    "repo": "Serial-ATA/lofty-rs",
+    "commit": "618731cee7aac784f5f08643bd5d8d005f3c01d6",
+    "file": "LICENSE-MIT",
+    "url": "https://raw.githubusercontent.com/Serial-ATA/lofty-rs/618731cee7aac784f5f08643bd5d8d005f3c01d6/LICENSE-MIT",
+    "sha256": "0884e92e74c08412d08bb7cbd121e3c09cbf2ae357972440b06f81b3305b0176",
+    "tag": "0.25.4"
+  },
+  {
+    "crate": "r-efi-5.3.0",
+    "repo": "r-efi/r-efi",
+    "commit": "97b55bed1c2c91dcbf787674849f05337ff80b33",
+    "tag": "v5.3.0",
+    "file": "AUTHORS",
+    "url": "https://raw.githubusercontent.com/r-efi/r-efi/97b55bed1c2c91dcbf787674849f05337ff80b33/AUTHORS",
+    "sha256": "ff92bed461f50338dd703a9ba9aee496a425957873df1d91192776e4bdf5dda7"
+  },
+  {
+    "crate": "r-efi-5.3.0",
+    "repo": "r-efi/r-efi",
+    "commit": "97b55bed1c2c91dcbf787674849f05337ff80b33",
+    "tag": "v5.3.0",
+    "file": "README.md",
+    "url": "https://raw.githubusercontent.com/r-efi/r-efi/97b55bed1c2c91dcbf787674849f05337ff80b33/README.md",
+    "sha256": "420f65fec3ba2e89d49da51b222d2881d26959037a7b7d3794143db4bd4627b1"
+  },
+  {
+    "crate": "r-efi-6.0.0",
+    "repo": "r-efi/r-efi",
+    "commit": "7e1b0322d31d625f81a5656096330934f9cd835d",
+    "tag": "v6.0.0",
+    "file": "AUTHORS",
+    "url": "https://raw.githubusercontent.com/r-efi/r-efi/7e1b0322d31d625f81a5656096330934f9cd835d/AUTHORS",
+    "sha256": "d027e91dbc9cdbb2f1190068e498bd6b61cff022b6a032b191021ba658d96111"
+  },
+  {
+    "crate": "r-efi-6.0.0",
+    "repo": "r-efi/r-efi",
+    "commit": "7e1b0322d31d625f81a5656096330934f9cd835d",
+    "tag": "v6.0.0",
+    "file": "README.md",
+    "url": "https://raw.githubusercontent.com/r-efi/r-efi/7e1b0322d31d625f81a5656096330934f9cd835d/README.md",
+    "sha256": "420f65fec3ba2e89d49da51b222d2881d26959037a7b7d3794143db4bd4627b1"
+  }
+]

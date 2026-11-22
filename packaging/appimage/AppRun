@@ -1,0 +1,34 @@
+#!/bin/sh
+set -eu
+APPDIR=${APPDIR:-$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)}
+export APPDIR
+export PATH="$APPDIR/usr/bin:$PATH"
+export LD_LIBRARY_PATH="$APPDIR/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export GSETTINGS_SCHEMA_DIR="$APPDIR/usr/share/glib-2.0/schemas"
+export FONTCONFIG_FILE="${FONTCONFIG_FILE:-$APPDIR/usr/etc/fonts/fonts.conf}"
+export FONTCONFIG_PATH="${FONTCONFIG_PATH:-$APPDIR/usr/etc/fonts}"
+export GIO_MODULE_DIR="$APPDIR/usr/lib/gio/modules"
+export GST_PLUGIN_SYSTEM_PATH_1_0="$APPDIR/usr/lib/gstreamer-1.0"
+export GST_PLUGIN_SCANNER_1_0="$APPDIR/usr/libexec/gstreamer-1.0/gst-plugin-scanner"
+# Keep the GStreamer cache separate from the host plugin registry.
+export GST_REGISTRY_1_0="${XDG_CACHE_HOME:-$HOME/.cache}/gnune/gstreamer-appimage-0.1.0.bin"
+mkdir -p "$(dirname "$GST_REGISTRY_1_0")"
+gnune_loaders=$(mktemp -d "${TMPDIR:-/tmp}/gnune-loaders.XXXXXXXX")
+trap 'rm -rf -- "$gnune_loaders"' EXIT HUP INT TERM
+mkdir -p "$gnune_loaders/glycin-loaders/2+/conf.d"
+sed "s|/usr/lib/x86_64-linux-gnu/gdk-pixbuf-2.0/|$APPDIR/usr/lib/gdk-pixbuf-2.0/|g" "$APPDIR/usr/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache" > "$gnune_loaders/pixbuf-loaders.cache"
+export GDK_PIXBUF_MODULE_FILE="$gnune_loaders/pixbuf-loaders.cache"
+# Honor explicit trust configuration; otherwise use the system's current CA bundle.
+if [ -z "${CURL_CA_BUNDLE:-}" ]; then
+    for gnune_ca in /etc/pki/tls/certs/ca-bundle.crt /etc/ssl/certs/ca-certificates.crt /etc/ssl/cert.pem; do
+        if [ -r "$gnune_ca" ]; then
+            export CURL_CA_BUNDLE="$gnune_ca"
+            break
+        fi
+    done
+fi
+for gnune_config in "$APPDIR"/usr/share/glycin-loaders/2+/conf.d/*.conf; do
+    sed "s|Exec=/usr/|Exec=$APPDIR/usr/|g" "$gnune_config" > "$gnune_loaders/glycin-loaders/2+/conf.d/$(basename "$gnune_config")"
+done
+export XDG_DATA_DIRS="$gnune_loaders:$APPDIR/usr/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+"$APPDIR/usr/bin/gnune" "$@"

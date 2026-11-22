@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Gnune
+Comment=Music, video and podcasts in a Zune inspired interface
+Exec=gnune %F
+Icon=org.gnune.Player
+Categories=AudioVideo;Player;GTK;
+Terminal=false
+StartupNotify=true
+MimeType=audio/mpeg;audio/flac;audio/ogg;audio/x-wav;video/mp4;video/webm;
