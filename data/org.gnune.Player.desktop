@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Gnune
+Comment=Browse and play your media collection
+Exec=gnune %F
+Icon=org.gnune.Player
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+StartupNotify=true

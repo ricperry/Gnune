@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>org.gnune.Player</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>Gnune</name>
+  <summary>Browse and play your local music and video collection</summary>
+  <description>
+    <p>Gnune brings the typography and artwork of the Zune desktop player to Linux.
+    Browse artists, albums and playlists, follow synchronized lyrics, or switch to
+    a compact player while a music video keeps playing.</p>
+  </description>
+  <launchable type="desktop-id">org.gnune.Player.desktop</launchable>
+  <developer id="io.github.ricperry">
+    <name>Richard Perry</name>
+  </developer>
+  <url type="homepage">https://github.com/ricperry/Gnune</url>
+  <url type="bugtracker">https://github.com/ricperry/Gnune/issues</url>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.0" date="2026-11-21"/>
+  </releases>
+</component>
