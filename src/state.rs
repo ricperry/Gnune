@@ -24,6 +24,11 @@ pub struct Library {
     pub assets: Vec<PathBuf>,
     pub video_tags: BTreeMap<PathBuf, crate::recognition::VideoTags>,
     pub feeds: Vec<String>,
+    pub podcast_shows: BTreeMap<String, crate::media::PodcastShow>,
+    pub podcast_orders: BTreeMap<String, crate::podcasts::EpisodeOrder>,
+    pub podcast_progress: BTreeMap<String, BTreeMap<String, crate::podcasts::EpisodeProgress>>,
+    pub last_podcast: Option<crate::podcasts::EpisodeId>,
+    pub podcast_downloads: BTreeMap<PathBuf, crate::podcasts::EpisodeId>,
     pub phone_progress: BTreeMap<PathBuf, f64>,
     pub episodes: BTreeMap<String, PathBuf>,
     pub progress: BTreeMap<PathBuf, f64>,
@@ -31,6 +36,40 @@ pub struct Library {
     pub current: Option<PathBuf>,
 }
 impl Library {
+    pub fn record_podcast_progress(
+        &mut self,
+        id: &crate::podcasts::EpisodeId,
+        position: f64,
+        completed: bool,
+    ) {
+        if !position.is_finite() {
+            return;
+        }
+        self.podcast_progress
+            .entry(id.feed_url.clone())
+            .or_default()
+            .insert(
+                id.episode_url.clone(),
+                crate::podcasts::EpisodeProgress {
+                    position_secs: position.max(0.),
+                    completed,
+                },
+            );
+        self.last_podcast = Some(id.clone());
+    }
+
+    /// Remove membership only; saved episodes, progress and cached show metadata remain usable.
+    pub fn unsubscribe_podcast(&mut self, feed: &str) -> bool {
+        let Ok(feed) = crate::podcasts::normalize_url(feed) else {
+            return false;
+        };
+        let before = self.feeds.len();
+        self.feeds.retain(|candidate| {
+            !crate::podcasts::normalize_url(candidate).is_ok_and(|candidate| candidate == feed)
+        });
+        self.feeds.len() != before
+    }
+
     pub fn normalize_album_groups(&mut self) {
         if self.covers.is_empty() {
             gnune::library::normalize_album_artists(&mut self.tracks);
@@ -262,6 +301,81 @@ pub fn lines(text: &str) -> Vec<Line> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn podcast_listening_state_roundtrips_and_legacy_libraries_default_to_newest() {
+        let mut library: Library =
+            serde_json::from_str(r#"{"feeds":["https://example.test/feed"]}"#).unwrap();
+        assert!(library.last_podcast.is_none());
+        assert!(library.podcast_progress.is_empty());
+        let id = crate::podcasts::EpisodeId::new(
+            "https://example.test:443/feed#alias",
+            "https://example.test/audio.mp3",
+        )
+        .unwrap();
+        library.podcast_orders.insert(
+            id.feed_url.clone(),
+            crate::podcasts::EpisodeOrder::OldestFirst,
+        );
+        library.record_podcast_progress(&id, 348., false);
+        library
+            .podcast_downloads
+            .insert(PathBuf::from("/tmp/saved.mp3"), id.clone());
+        let saved = serde_json::to_string(&library).unwrap();
+        assert!(saved.contains("oldest_first"));
+        let restored: Library = serde_json::from_str(&saved).unwrap();
+        assert_eq!(restored.last_podcast, Some(id.clone()));
+        assert_eq!(
+            restored.podcast_progress[&id.feed_url][&id.episode_url].position_secs,
+            348.
+        );
+        assert_eq!(
+            restored.podcast_downloads[&PathBuf::from("/tmp/saved.mp3")],
+            id
+        );
+        assert_eq!(
+            crate::podcasts::EpisodeOrder::default(),
+            crate::podcasts::EpisodeOrder::NewestFirst
+        );
+    }
+
+    #[test]
+    fn unsubscribing_removes_canonical_aliases_and_preserves_downloads_and_show_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let downloaded = dir.path().join("saved.wav");
+        fs::write(&downloaded, b"offline audio").unwrap();
+        let feed = "https://example.test/feed";
+        let mut library = Library {
+            feeds: vec![
+                "https://example.test:443/feed#old".into(),
+                feed.into(),
+                "https://other.test/feed".into(),
+            ],
+            ..Default::default()
+        };
+        library
+            .episodes
+            .insert("Saved episode".into(), downloaded.clone());
+        library.podcast_shows.insert(
+            feed.into(),
+            crate::media::PodcastShow {
+                title: "Cached show".into(),
+                ..Default::default()
+            },
+        );
+        assert!(library.unsubscribe_podcast(feed));
+        assert_eq!(library.feeds, ["https://other.test/feed"]);
+        assert_eq!(library.podcast_shows[feed].title, "Cached show");
+        assert_eq!(
+            fs::read(&library.episodes["Saved episode"]).unwrap(),
+            b"offline audio"
+        );
+        let reloaded: Library =
+            serde_json::from_str(&serde_json::to_string(&library).unwrap()).unwrap();
+        assert!(!crate::podcasts::contains_feed(&reloaded.feeds, feed));
+        assert_eq!(reloaded.episodes["Saved episode"], downloaded);
+        assert!(!library.unsubscribe_podcast(feed));
+        assert!(!library.unsubscribe_podcast("not a URL"));
+    }
 
     fn legacy_compilation(folder: &str) -> Vec<Track> {
         ["Performer One", "Performer Two"]

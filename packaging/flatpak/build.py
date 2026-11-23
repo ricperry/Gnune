@@ -62,7 +62,8 @@ def main():
             s, d = source / name, stage / name
             if name == 'assets':
                 d.mkdir(parents=True, exist_ok=True)
-                for asset in ['gnune.gresource.xml', 'gnuneIconDraft2.png', 'gnuneIconDraft2.svg']:
+                for asset in ['gnune.gresource.xml', 'gnuneIconDraft2.png', 'gnuneIconDraft2.svg', 'icons/gnune-rewind-10-symbolic.svg']:
+                    (d / asset).parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(s / asset, d / asset)
             elif s.is_dir(): shutil.copytree(s, d, dirs_exist_ok=True, ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
             elif s.exists(): d.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(s, d)

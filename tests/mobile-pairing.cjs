@@ -8,13 +8,13 @@ const code = 'a'.repeat(48);
 const queue = {scope: 'album', tracks: [{id: 'song', version: '1', title: 'Song', artist: 'Artist', album: 'Album', bytes: 8}]};
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
-async function companion({scan = '', paired = false, offline = false, savedCode = '', cookie = false, revoked = false, catalogData = queue, pairingCatalog = catalogData, savedAudio = [], savedPending = []} = {}) {
+async function companion({scan = '', paired = false, offline = false, savedCode = '', cookie = false, revoked = false, catalogData = queue, pairingCatalog = catalogData, savedAudio = [], savedPending = [], sharedData, podcastData, rejectState = false} = {}) {
   const elements = new Map();
   const element = () => {
     const attributes = new Map();
-    return {hidden: false, disabled: true, paused: true, value: '', textContent: '', src: '', dataset: {},
-      classList: {add() {}}, append() {}, replaceChildren() {}, addEventListener() {},
-      pause() { this.paused = true; }, async play() { this.paused = false; }, load() {},
+    return {hidden: false, disabled: true, paused: true, currentTime: 0, duration: 300, ended: false, value: '', textContent: '', src: '', dataset: {},
+      classList: {add() {}}, append() {}, prepend() {}, replaceChildren() {}, addEventListener() {},
+      pause() { this.paused = true; }, async play() { this.onloadedmetadata?.(); this.paused = false; }, load() {},
       setAttribute(key, value) { attributes.set(key, value); },
       getAttribute(key) { return key === 'src' ? this.src : attributes.get(key); },
       removeAttribute(key) { attributes.delete(key); if (key === 'src') this.src = ''; }};
@@ -27,7 +27,7 @@ async function companion({scan = '', paired = false, offline = false, savedCode 
   let activeCatalog = catalogData;
   const sessions = new Map(savedCode ? [['gnune-pair', savedCode]] : []);
   const requests = [], reads = [];
-  let connected = !offline;
+  let connected = !offline, rejectMutations = rejectState;
   const database = {
     transaction(name) {
       const tx = {objectStore(store) {
@@ -60,6 +60,23 @@ async function companion({scan = '', paired = false, offline = false, savedCode 
       }
       if (path === '/api/resume') return (paired || cookie) && !revoked ? {ok: true, json: async () => ({token: 'old', scope: 'album', last_seq: 20})} : {ok: false, status: 401, text: async () => 'Pair this phone using the desktop share link'};
       if (path === '/api/manifest') return {ok: true, json: async () => activeCatalog};
+      if (path === '/api/quickplay') return sharedData ? {ok:true,json:async()=>structuredClone(sharedData)} : {ok:false,status:404,text:async()=> 'Unsupported by old desktop'};
+      if (path.startsWith('/api/media-state/')) {
+        const id=decodeURIComponent(path.slice('/api/media-state/'.length));
+        const ep=podcastData?.episodes.find(ep=>ep.id===id);
+        const value=sharedData?.progress?.[id] || ep?.progress;
+        return value ? {ok:true,json:async()=>structuredClone(value)} : {ok:false,status:404,text:async()=> 'Unknown'};
+      }
+      if (path.startsWith('/api/podcast-show/')) return {ok:true,json:async()=>structuredClone(podcastData)};
+      if (path === '/api/podcast-session') return {ok:true,json:async()=>({url:'/api/podcast-media/episode'})};
+      if (path === '/api/state') {
+        const mutation=JSON.parse(options.body);
+        if(rejectMutations) return {ok:false,status:409,text:async()=> 'Newer progress exists'};
+        const progress={position:mutation.position||0,completed:Boolean(mutation.completed),revision:`r${mutation.position||0}`};
+        if(mutation.action==='progress' && sharedData) {sharedData.progress ||= {}; sharedData.progress[mutation.id]=progress;}
+        return {ok:true,json:async()=>({saved:true,progress})};
+      }
+      if (path === '/api/progress') return {ok:true,json:async()=>({ack:JSON.parse(options.body).updates.map(u=>u.seq)})};
       if (path.startsWith('/api/media/')) return {ok: true, blob: async () => new Blob(['12345678'])};
       if (path === '/api/video-session') return {ok: true, json: async () => ({url: '/api/video/clip'})};
       throw new Error(`Unexpected request: ${path}`);
@@ -68,7 +85,7 @@ async function companion({scan = '', paired = false, offline = false, savedCode 
   const initialized = vm.runInContext(source, context);
   for (let i = 0; i < 20 && get('pair').disabled; i++) await tick();
   await initialized;
-  return {get, stores, sessions, requests, reads, context, setOnline(value) { connected = value; }};
+  return {get, stores, sessions, requests, reads, context, setOnline(value) { connected = value; }, setRejectState(value) { rejectMutations = value; }};
 }
 
 test('scan exposes deliberate pairing before offline worker becomes ready, without downloading', async () => {
@@ -81,7 +98,7 @@ test('scan exposes deliberate pairing before offline worker becomes ready, witho
   await app.get('pair').onclick();
   assert.equal(JSON.parse(app.requests[0].options.body).code, code);
   assert.equal(app.requests[0].options.headers.has('Authorization'), false);
-  assert.deepEqual(app.requests.map(r => r.path), ['/api/pair', '/api/manifest']);
+  assert.deepEqual(app.requests.map(r => r.path), ['/api/pair', '/api/manifest', '/api/quickplay']);
   assert.equal(app.get('pairing').hidden, true);
   assert.equal(app.get('library').hidden, false);
   assert.equal(app.sessions.has('gnune-pair'), false);
@@ -211,4 +228,107 @@ test('installed queue app can change to a new library pairing without deleting o
   assert.equal(app.stores.audio.get('album:song:1'), blob);
   assert.equal(app.stores.pending.get('album:song'), pending);
   assert.equal(app.requests.some(request => request.path === '/api/forget' || request.path.startsWith('/api/media/')), false);
+});
+
+
+const phoneShared = () => ({pins:[{id:'record',track:'song'}],new:[{id:'record',track:'song'}],history:[],progress:{song:{position:42,completed:false,revision:'r42'}},includes_podcasts:true,podcasts:[{id:'show',title:'Radio',summary:'A show',order:'newest_first'}],last_podcast:{show:'show',episode:'first'},last_revision:'last0'});
+const phoneEpisodes = () => ({id:'show',order:'newest_first',episodes:[{id:'first',show:'show',title:'First',published:20,progress:{position:32,completed:false,revision:'r32'}},{id:'second',show:'show',title:'Second',published:10,progress:{position:0,completed:false,revision:'r0'}}]});
+
+test('shared Quickplay browsing and podcast episode listing transfer no media; play selects only one trusted session', async()=>{
+  const app=await companion({paired:true,catalogData:{...queue,mode:'library'},sharedData:phoneShared(),podcastData:phoneEpisodes()});
+  await vm.runInContext("openPodcast('show')",app.context);
+  assert.equal(app.requests.some(r=>r.path==='/api/podcast-session'),false);
+  assert.equal(app.get('audio').src,'');
+  await vm.runInContext("playPodcast(0,['first','second'])",app.context);
+  assert.equal(app.get('audio').src,'/api/podcast-media/episode');
+  assert.equal(app.get('audio').currentTime,32);
+  assert.equal(app.stores.audio.size,0,'streaming podcasts never fill song Blob cache');
+  assert.equal(app.requests.filter(r=>r.path==='/api/podcast-session').length,1);
+  assert.equal(app.requests.some(r=>r.path.startsWith('http')),false);
+});
+
+test('podcast queue survives browsing another show; EOS skips completed and rewind preserves paused state', async()=>{
+  const data=phoneEpisodes(); data.episodes.push({id:'third',show:'show',title:'Third',progress:{position:7,completed:false,revision:'r7'}});data.episodes[1].progress.completed=true;
+  const app=await companion({paired:true,catalogData:{...queue,mode:'library'},sharedData:phoneShared(),podcastData:data});
+  await vm.runInContext("openPodcast('show');",app.context);
+  await vm.runInContext("playPodcast(0,['first','second','third'])",app.context);
+  vm.runInContext("navigate({area:'music',detail:null})",app.context);
+  await vm.runInContext('adjacent(1,true)',app.context);
+  assert.equal(vm.runInContext('currentPodcast.id',app.context),'third');
+  app.get('audio').currentTime=7;app.get('audio').paused=true;
+  await vm.runInContext('rewind()',app.context);
+  assert.equal(app.get('audio').currentTime,0);
+  assert.equal(app.get('audio').paused,true);
+});
+
+test('mobile rewind synchronizes music/video positions and keeps video data out of offline audio cache',async()=>{
+  const shared=phoneShared();shared.progress.clip={position:22,completed:false,revision:'r22'};
+  const app=await companion({paired:true,catalogData:{...queue,mode:'library',includes_video:true,videos:[{id:'clip',title:'Clip'}]},sharedData:shared});
+  await vm.runInContext("playVideo(0,['clip'])",app.context);
+  assert.equal(app.get('video').currentTime,22);
+  app.get('video').currentTime=22;app.get('video').paused=true;
+  await vm.runInContext('rewind()',app.context);
+  assert.equal(app.get('video').currentTime,12);
+  assert.equal(app.get('video').paused,true);
+  assert.equal(app.stores.audio.size,0);
+  assert.ok(app.requests.some(r=>r.path==='/api/state'&&JSON.parse(r.options.body).id==='clip'));
+});
+
+test('a conflicting offline position cannot silently replace newer shared progress',async()=>{
+  const app=await companion({paired:true,catalogData:{...queue,mode:'library'},sharedData:phoneShared(),rejectState:true});
+  await vm.runInContext("play(0,['song'])",app.context);
+  await tick();await tick();
+  app.get('audio').currentTime=10;
+  await vm.runInContext('sync()',app.context);
+  assert.equal(vm.runInContext('currentTrack.conflicted',app.context),true);
+  assert.equal(app.stores.pending.size,0);
+});
+
+
+test('modern revision survives repeated lightweight polls and conflict recovers on deliberate reopen',async()=>{
+  const app=await companion({paired:true,catalogData:{...queue,mode:'library'},sharedData:phoneShared(),rejectState:true});
+  await vm.runInContext("play(0,['song'])",app.context);
+  await tick();await tick();
+  await vm.runInContext('sync()',app.context);
+  assert.match(app.get('status').textContent,/newer listening position/);
+  app.setRejectState(false);
+  await vm.runInContext("play(0,['song'])",app.context);
+  await tick();await tick();
+  await vm.runInContext('refreshShared();',app.context);
+  app.get('audio').currentTime=40;
+  await vm.runInContext('sync()',app.context);
+  assert.equal(vm.runInContext('currentTrack.conflicted',app.context),false);
+  assert.equal(app.requests.some(r=>r.path==='/api/progress'),false,'new phone edits must keep CAS across polls');
+});
+
+test('a slow earlier podcast open cannot replace a later selected song',async()=>{
+  const app=await companion({paired:true,catalogData:{...queue,mode:'library'},sharedData:phoneShared(),podcastData:phoneEpisodes()});
+  vm.runInContext("const originalFetch=fetch;let releaseShow;fetch=(path,options)=>path.startsWith('/api/podcast-show/')?new Promise(resolve=>{releaseShow=()=>originalFetch(path,options).then(resolve);}):originalFetch(path,options);",app.context);
+  const opened=vm.runInContext("openPodcast('show','latest')",app.context);
+  for(let i=0;i<20&&!vm.runInContext('Boolean(releaseShow)',app.context);i++)await tick();
+  await vm.runInContext("play(0,['song'])",app.context);
+  vm.runInContext('releaseShow()',app.context);await opened;
+  assert.equal(vm.runInContext('currentTrack.id',app.context),'song');
+  assert.equal(vm.runInContext('currentPodcast',app.context),undefined);
+  assert.equal(app.requests.some(r=>r.path==='/api/podcast-session'),false);
+});
+
+test('completed last-episode Quickplay resume wraps to an earlier unfinished episode',async()=>{
+  const episodes=phoneEpisodes();episodes.episodes[1].progress.completed=true;
+  const app=await companion({paired:true,catalogData:{...queue,mode:'library'},sharedData:phoneShared(),podcastData:episodes});
+  await vm.runInContext("openPodcast('show','second')",app.context);
+  assert.equal(vm.runInContext('currentPodcast.id',app.context),'first');
+  assert.equal(app.get('audio').currentTime,32);
+});
+
+test('clearing a manifest on pairing replacement clears podcast capability and active queue state',async()=>{
+  const app=await companion({paired:true,catalogData:{...queue,mode:'library'},sharedData:phoneShared(),podcastData:phoneEpisodes()});
+  await vm.runInContext("openPodcast('show')",app.context);
+  await vm.runInContext("playPodcast(0,['first','second'])",app.context);
+  vm.runInContext('stopPlayback();acceptManifest(undefined)',app.context);
+  assert.equal(vm.runInContext('sharedState',app.context),undefined);
+  assert.equal(vm.runInContext('podcastShows.size',app.context),0);
+  assert.equal(vm.runInContext('activePodcastShow',app.context),undefined);
+  assert.equal(vm.runInContext('podcastQueue.length',app.context),0);
+  assert.equal(app.stores.settings.get('podcastPlayback').token,'old');
 });

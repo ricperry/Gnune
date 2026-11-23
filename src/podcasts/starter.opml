@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Publisher feed URLs verified 2026-11-22. Sources:
+ https://support.bbc.co.uk/platform/feeds/RadioandMusicFeeds.htm
+ https://www.bbc.co.uk/radio/opml/bbc_podcast_opml.xml
+ https://www.nasa.gov/podcasts/houston-we-have-a-podcast/
+ https://www.nasa.gov/podcasts/curious-universe/
+ https://somafm.com/sfinsf/rssfeed.html
+ Descriptions are brief Gnune editorial labels; Read feed retrieves the publisher summary. -->
+<opml version="2.0"><head><title>Gnune starter podcasts</title></head><body>
+<outline text="BBC">
+<outline text="In Our Time" xmlUrl="https://podcasts.files.bbci.co.uk/b006qykl.rss" description="Discussions about history, culture, philosophy and science."/>
+<outline text="The Infinite Monkey Cage" xmlUrl="https://podcasts.files.bbci.co.uk/b00snr0w.rss" description="Science and comedy from BBC Radio 4."/>
+<outline text="Global News Podcast" xmlUrl="https://podcasts.files.bbci.co.uk/p02nq0gn.rss" description="News and reporting from the BBC World Service."/>
+</outline>
+<outline text="NASA">
+<outline text="Houston, We Have a Podcast" xmlUrl="https://www.nasa.gov/feeds/podcasts/houston-we-have-a-podcast" description="Conversations about human spaceflight at NASA."/>
+<outline text="NASA's Curious Universe" xmlUrl="https://www.nasa.gov/feeds/podcasts/curious-universe" description="Explore space, science and NASA missions."/>
+</outline>
+<outline text="SomaFM"><outline text="SF in SF" xmlUrl="https://somafm.com/sfinsf/feed.rss" description="Science fiction author readings from San Francisco."/></outline>
+</body></opml>

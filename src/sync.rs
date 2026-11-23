@@ -1,4 +1,4 @@
-//! Opt-in local HTTPS phone companion. No listener exists until `start` runs.
+//! Opt-in HTTPS phone companion. Only Pair phone starts new sharing consent.
 use gnune::library::Track;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -17,7 +17,10 @@ use std::{
     time::{Duration, Instant, UNIX_EPOCH},
 };
 use tiny_http::{Header, Method, Request, Response, Server, SslConfig};
+mod companion;
+mod reachability;
 mod settings;
+pub use companion::Change;
 mod video;
 
 #[derive(Debug)]
@@ -51,14 +54,19 @@ pub fn stop_remembered() -> Result<(), String> {
 
 pub fn resume(
     library: &crate::state::Library,
-    callback: impl Fn(PathBuf, f64) + Send + 'static,
+    callback: impl Fn(Change) + Send + 'static,
 ) -> Result<Option<Session>, SharingError> {
+    let migration_guard = settings::migration_guard().map_err(|message| SharingError {
+        message,
+        retryable: true,
+        waiting: true,
+    })?;
     let Some(saved) = settings::load()?.filter(|saved| saved.enabled) else {
         return Ok(None);
     };
     let result = (|| {
         let selected = if saved.mode == ShareMode::Library {
-            library_selection(library, saved.include_video)?
+            library_selection(library, saved.include_video, saved.include_podcasts)?
         } else {
             (
                 saved
@@ -68,7 +76,12 @@ pub fn resume(
                 saved.skipped,
             )
         };
-        start_configured(selected, callback, settings::connection(Some(&saved))?)
+        start_configured(
+            selected,
+            callback,
+            settings::connection(Some(&saved))?,
+            migration_guard,
+        )
     })();
     result.map(Some).map_err(|mut e| {
         e.waiting = true;
@@ -82,10 +95,36 @@ pub struct Session {
     pub track_count: usize,
     pub skipped: usize,
     pub include_video: bool,
+    pub include_podcasts: bool,
+    live: Arc<Mutex<Arc<companion::Snapshot>>>,
+    _migration_guard: fs::File,
     server: Arc<Server>,
     stop: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
-    pairing: Arc<Mutex<Pairing>>,
+    sharing: Arc<Mutex<ActiveShare>>,
+    remembered: settings::Saved,
+    route: reachability::RouteCheck,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PairingStatus {
+    Ready,
+    Checking,
+    Unavailable,
+    Used,
+    Expired,
+    Limited,
+}
+struct ActiveShare {
+    selection: Arc<Grant>,
+    revision: u64,
+    pairing: Pairing,
+}
+impl ActiveShare {
+    fn replace(&mut self, selection: Grant, code: String) {
+        self.selection = Arc::new(selection);
+        self.revision += 1;
+        self.pairing = Pairing::new(code);
+    }
 }
 struct Pairing {
     code: Option<String>,
@@ -100,18 +139,99 @@ impl Pairing {
             failures: 0,
         }
     }
+    fn status(&self) -> PairingStatus {
+        if self.failures >= 30 {
+            PairingStatus::Limited
+        } else if self.code.is_none() {
+            PairingStatus::Used
+        } else if Instant::now() > self.expires {
+            PairingStatus::Expired
+        } else {
+            PairingStatus::Ready
+        }
+    }
     fn accepts(&self, code: &str) -> bool {
-        self.failures < 30 && Instant::now() <= self.expires && self.code.as_deref() == Some(code)
+        self.status() == PairingStatus::Ready && self.code.as_deref() == Some(code)
     }
 }
 impl Session {
+    pub fn publish(&self, library: &crate::state::Library) {
+        *self.live.lock().unwrap_or_else(|e| e.into_inner()) =
+            Arc::new(companion::Snapshot::new(library));
+    }
     pub fn renew_pairing(&mut self) {
         let code = token();
         self.url = format!(
             "{}#pair={code}",
             self.url.split('#').next().unwrap_or(&self.url)
         );
-        *self.pairing.lock().unwrap_or_else(|e| e.into_inner()) = Pairing::new(code);
+        self.sharing
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pairing = Pairing::new(code);
+    }
+    pub fn pairing_status(&self) -> PairingStatus {
+        let status = self.code_status();
+        if status == PairingStatus::Ready && self.can_pair_phone() {
+            self.route.check(false)
+        } else {
+            status
+        }
+    }
+    fn code_status(&self) -> PairingStatus {
+        self.sharing
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pairing
+            .status()
+    }
+    /// Navigation can replace a consumed/expired code, but never bypass a lockout.
+    pub fn prepare_pairing(&mut self) {
+        if matches!(
+            self.code_status(),
+            PairingStatus::Used | PairingStatus::Expired
+        ) {
+            self.renew_pairing();
+        }
+        self.route.check(true);
+    }
+    pub fn can_pair_phone(&self) -> bool {
+        self.remembered.connection.is_tailscale()
+            && self.mode == ShareMode::Library
+            && self.include_video
+            && self.include_podcasts
+    }
+    pub fn pair_phone(&mut self, library: &crate::state::Library) -> Result<(), String> {
+        if !self.remembered.connection.is_tailscale() {
+            return Err("Set up Tailscale sharing, then reopen Gnune to pair your phone.".into());
+        }
+        self.replace_selection(library_selection(library, true, true)?)?;
+        self.publish(library);
+        Ok(())
+    }
+    fn replace_selection(&mut self, (selection, skipped): (Grant, usize)) -> Result<(), String> {
+        let mut remembered = self.remembered.clone();
+        remembered.mode = selection.mode;
+        remembered.include_video = selection.includes_video;
+        remembered.include_podcasts = selection.includes_podcasts;
+        remembered.queue = (selection.mode == ShareMode::Queue).then(|| selection.clone());
+        remembered.skipped = skipped;
+        // Durable consent must succeed before the active listener changes scope.
+        settings::save(&remembered)?;
+        let code = token();
+        self.mode = selection.mode;
+        self.track_count = selection.tracks.len();
+        self.include_video = selection.includes_video;
+        self.include_podcasts = selection.includes_podcasts;
+        self.skipped = skipped;
+        let mut sharing = self.sharing.lock().unwrap_or_else(|e| e.into_inner());
+        sharing.replace(selection, code.clone());
+        self.url = format!(
+            "{}#pair={code}",
+            self.url.split('#').next().unwrap_or(&self.url)
+        );
+        self.remembered = remembered;
+        Ok(())
     }
 }
 impl Drop for Session {
@@ -181,6 +301,12 @@ struct Grant {
     videos: BTreeMap<String, video::VideoFile>,
     #[serde(default)]
     video_playlists: Vec<SharedPlaylist>,
+    #[serde(default)]
+    includes_podcasts: bool,
+    #[serde(default)]
+    podcasts: BTreeMap<String, String>,
+    #[serde(default)]
+    podcast_episodes: BTreeMap<String, companion::Episode>,
 }
 fn refresh_library_grants(store: &mut Store, selection: &Grant) {
     if selection.mode != ShareMode::Library {
@@ -191,6 +317,12 @@ fn refresh_library_grants(store: &mut Store, selection: &Grant) {
         .values_mut()
         .filter(|grant| grant.mode == ShareMode::Library)
     {
+        if grant.includes_podcasts && selection.includes_podcasts {
+            grant.podcasts = selection.podcasts.clone();
+        } else {
+            grant.podcasts.clear();
+            grant.podcast_episodes.clear();
+        }
         grant.tracks = selection.tracks.clone();
         grant.files = selection.files.clone();
         grant.playlists = selection.playlists.clone();
@@ -198,6 +330,7 @@ fn refresh_library_grants(store: &mut Store, selection: &Grant) {
             .artwork
             .iter()
             .filter(|(id, _)| grant.includes_video || !video::is_art(selection, id))
+            .filter(|(id, _)| grant.includes_podcasts || !companion::is_art(selection, id))
             .map(|(id, art)| (id.clone(), art.clone()))
             .collect();
         // The original video cap survives a music-only active session. A later
@@ -279,6 +412,23 @@ fn header(request: &Request, name: &'static str) -> Option<String> {
         .iter()
         .find(|h| h.field.equiv(name))
         .map(|h| h.value.as_str().to_owned())
+}
+// Icons are public install metadata, including Safari's root discovery probes.
+// Only these routes ignore query strings; API and media routing stays unchanged.
+fn mobile_icon(path: &str) -> Option<(&'static [u8], &'static str)> {
+    match path.split('?').next().unwrap_or(path) {
+        "/favicon.ico" => Some((include_bytes!("mobile/favicon.ico"), "image/x-icon")),
+        "/gnune-touch-icon-180-v1.png"
+        | "/apple-touch-icon.png"
+        | "/apple-touch-icon-precomposed.png" => Some((
+            include_bytes!("mobile/gnune-touch-icon-180-v1.png"),
+            "image/png",
+        )),
+        "/icon-192.png" => Some((include_bytes!("mobile/icon-192.png"), "image/png")),
+        "/icon-512.png" => Some((include_bytes!("mobile/icon-512.png"), "image/png")),
+        "/icon.svg" => Some((include_bytes!("mobile/icon.svg"), "image/svg+xml")),
+        _ => None,
+    }
 }
 fn reply(request: Request, status: u16, body: impl Into<Vec<u8>>, mime: &str) {
     reply_headers(request, status, body, mime, &[]);
@@ -434,6 +584,7 @@ fn selection(
         includes_video: false,
         videos: BTreeMap::new(),
         video_playlists: Vec::new(),
+        ..Grant::default()
     };
     let mut selected = Vec::new();
     for track in tracks {
@@ -576,28 +727,42 @@ fn artwork(grant: &Grant, id: &str) -> Result<Vec<u8>, String> {
         .map_err(|_| "Artwork unavailable".into())
 }
 
-/// The caller must invoke this only after an explicit Share action. PEM material
-/// is supplied by the user; this module never changes certificate trust/firewalls.
-pub fn start(
-    tracks: Vec<Track>,
-    callback: impl Fn(PathBuf, f64) + Send + 'static,
-) -> Result<Session, SharingError> {
-    start_selection(
-        selection(tracks, ShareMode::Queue, &BTreeMap::new(), &BTreeMap::new())?,
-        callback,
-    )
-}
+const TAILSCALE_SETUP: &str = "Close Gnune, then preview setup from its source folder: python3 scripts/gnune-tailscale-setup.py. Follow README Phone collection and playback to apply setup, then reopen Gnune.";
 
-pub fn start_library(
+/// Read-only check. This never changes the network or opens a listener.
+pub fn pairing_setup() -> Result<(), String> {
+    let saved = settings::load()?;
+    let connection =
+        settings::connection(saved.as_ref()).map_err(|_| TAILSCALE_SETUP.to_owned())?;
+    if !connection.is_tailscale() {
+        return Err(TAILSCALE_SETUP.into());
+    }
+    Ok(())
+}
+/// Only the explicit Pair phone action starts or enlarges sharing consent.
+pub fn pair_phone(
     library: &crate::state::Library,
-    include_videos: bool,
-    callback: impl Fn(PathBuf, f64) + Send + 'static,
+    callback: impl Fn(Change) + Send + 'static,
 ) -> Result<Session, SharingError> {
-    start_selection(library_selection(library, include_videos)?, callback)
+    let migration_guard = settings::migration_guard()?;
+    let saved = settings::load()?;
+    let connection = settings::connection(saved.as_ref())?;
+    if !connection.is_tailscale() {
+        return Err(TAILSCALE_SETUP.into());
+    }
+    let session = start_configured(
+        library_selection(library, true, true)?,
+        callback,
+        connection,
+        migration_guard,
+    )?;
+    session.publish(library);
+    Ok(session)
 }
 fn library_selection(
     library: &crate::state::Library,
     include_videos: bool,
+    include_podcasts: bool,
 ) -> Result<(Grant, usize), String> {
     let (mut grant, skipped) = selection(
         library
@@ -613,30 +778,39 @@ fn library_selection(
     if include_videos {
         video::include(&mut grant, library);
     }
-    if grant.tracks.is_empty() && grant.videos.is_empty() {
-        return Err("There are no available files to share.".into());
+    if include_podcasts {
+        grant.includes_podcasts = true;
+        companion::include(&mut grant, library);
+        grant.podcasts = library
+            .feeds
+            .iter()
+            .filter_map(|feed| crate::podcasts::normalize_url(feed).ok())
+            .map(|feed| (hash(&format!("podcast-show/{feed}")), feed))
+            .collect();
     }
     Ok((grant, skipped))
 }
 
-fn start_selection(
-    (selection, skipped): (Grant, usize),
-    callback: impl Fn(PathBuf, f64) + Send + 'static,
-) -> Result<Session, SharingError> {
-    let saved = settings::load()?;
-    let connection = settings::connection(saved.as_ref())?;
-    start_configured((selection, skipped), callback, connection)
-}
 fn start_configured(
     (selection, skipped): (Grant, usize),
-    callback: impl Fn(PathBuf, f64) + Send + 'static,
+    callback: impl Fn(Change) + Send + 'static,
     connection: settings::Connection,
+    migration_guard: fs::File,
 ) -> Result<Session, SharingError> {
-    let (cert, key) = settings::tls(&connection)?;
+    let proxied = connection.serve_socket.is_some();
+    let pairing_transport = connection.is_tailscale();
+    let tls = if proxied {
+        None
+    } else {
+        Some(settings::tls(&connection)?)
+    };
     let origin = connection.origin.clone();
     let mode = selection.mode;
     let track_count = selection.tracks.len();
     let include_video = selection.includes_video;
+    let include_podcasts = selection.includes_podcasts;
+    let live = Arc::new(Mutex::new(Arc::new(companion::Snapshot::default())));
+    let worker_live = live.clone();
     let state = state_path()?;
     let mut store: Store = match fs::read(&state) {
         Ok(bytes) => serde_json::from_slice(&bytes)
@@ -652,16 +826,24 @@ fn start_configured(
         connection: connection.clone(),
         mode,
         include_video,
+        include_podcasts,
         queue: (mode == ShareMode::Queue).then(|| selection.clone()),
         skipped,
     };
-    let server = match Server::https(
-        connection.bind,
-        SslConfig {
-            certificate: cert,
-            private_key: key,
-        },
-    ) {
+    let listener = if let Some(path) = &connection.serve_socket {
+        settings::unix_server(path)
+            .map_err(|e| Box::<dyn std::error::Error + Send + Sync>::from(std::io::Error::other(e)))
+    } else {
+        let (cert, key) = tls.expect("native TLS configuration");
+        Server::https(
+            connection.bind,
+            SslConfig {
+                certificate: cert,
+                private_key: key,
+            },
+        )
+    };
+    let server = match listener {
         Ok(server) => {
             settings::save(&remembered)?;
             Arc::new(server)
@@ -674,10 +856,17 @@ fn start_configured(
                 settings::save(&remembered)?;
             }
             return Err(SharingError {
-                message: format!(
-                    "Phone sharing could not start at {}: {error}",
-                    connection.bind
-                ),
+                message: if retryable {
+                    format!(
+                        "This PC does not currently have the saved sharing address {}. A router DHCP reservation preserves the existing phone icon. For stable Tailscale access, close Gnune and preview scripts/gnune-tailscale-setup.py on the host; a new hostname needs one new phone pairing.",
+                        connection.bind.ip()
+                    )
+                } else {
+                    format!(
+                        "Phone sharing could not start at {}: {error}",
+                        connection.bind
+                    )
+                },
                 retryable,
                 waiting: retryable,
             });
@@ -686,13 +875,21 @@ fn start_configured(
     let stop = Arc::new(AtomicBool::new(false));
     let code = token();
     let session_url = format!("{origin}/#pair={code}");
-    let pairing = Arc::new(Mutex::new(Pairing::new(code)));
-    let worker_pairing = pairing.clone();
+    let sharing = Arc::new(Mutex::new(ActiveShare {
+        selection: Arc::new(selection),
+        revision: 0,
+        pairing: Pairing::new(code),
+    }));
+    let worker_share = sharing.clone();
+    let route = reachability::RouteCheck::new(&origin);
+    let route_identity = route.identity.clone();
     let worker_server = server.clone();
     let worker_stop = stop.clone();
     let serve = move || {
         let mut video_sessions = video::Sessions::default();
+        let mut podcast_sessions = companion::Sessions::default();
         let streams = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut revision = 0;
         while !worker_stop.load(Ordering::Acquire) {
             let mut request = match worker_server.recv_timeout(Duration::from_millis(200)) {
                 Ok(Some(r)) => r,
@@ -702,9 +899,31 @@ fn start_configured(
             if worker_stop.load(Ordering::Acquire) {
                 break;
             }
+            let (current_revision, selection) = {
+                let sharing = worker_share.lock().unwrap_or_else(|e| e.into_inner());
+                (sharing.revision, sharing.selection.clone())
+            };
+            if current_revision != revision {
+                refresh_library_grants(&mut store, &selection);
+                // Retry a failed write before serving or issuing a grant for the new scope.
+                if let Err(error) = persist(&state, &store) {
+                    reply(request, 500, error, "text/plain");
+                    continue;
+                }
+                revision = current_revision;
+            }
+            let mode = selection.mode;
+            let include_video = selection.includes_video;
+            let include_podcasts = selection.includes_podcasts;
+            companion::refresh_grants(
+                &mut store.devices,
+                &worker_live.lock().unwrap_or_else(|e| e.into_inner()),
+                mode,
+                include_podcasts,
+            );
             let path = request.url().to_owned();
             let method = request.method().clone();
-            if header(&request, "Host").as_deref() != origin.strip_prefix("https://") {
+            if !valid_authority(&request, &origin, proxied) {
                 reply(
                     request,
                     421,
@@ -713,25 +932,17 @@ fn start_configured(
                 );
                 continue;
             }
+            if pairing_transport && method == Method::Get && path == reachability::PATH {
+                reply(request, 200, route_identity.as_bytes(), "text/plain");
+                continue;
+            }
+            if matches!(method, Method::Get | Method::Head)
+                && let Some((body, mime)) = mobile_icon(&path)
+            {
+                reply(request, 200, body, mime);
+                continue;
+            }
             if method == Method::Get {
-                if path == "/icon-192.png" {
-                    reply(
-                        request,
-                        200,
-                        include_bytes!("mobile/icon-192.png").as_slice(),
-                        "image/png",
-                    );
-                    continue;
-                }
-                if path == "/icon-512.png" {
-                    reply(
-                        request,
-                        200,
-                        include_bytes!("mobile/icon-512.png").as_slice(),
-                        "image/png",
-                    );
-                    continue;
-                }
                 let asset = match path.as_str() {
                     "/" => Some((
                         include_str!("mobile/index.html"),
@@ -752,7 +963,6 @@ fn start_configured(
                     "/style.css" => {
                         Some((include_str!("mobile/style.css"), "text/css; charset=utf-8"))
                     }
-                    "/icon.svg" => Some((include_str!("mobile/icon.svg"), "image/svg+xml")),
                     "/manifest.webmanifest" => Some((
                         r##"{"name":"Gnune on your phone","short_name":"Gnune","id":"/","start_url":"/","scope":"/","display":"standalone","background_color":"#111014","theme_color":"#111014","icons":[{"src":"/icon-192.png","sizes":"192x192","type":"image/png","purpose":"any"},{"src":"/icon-512.png","sizes":"512x512","type":"image/png","purpose":"any"}]}"##,
                         "application/manifest+json",
@@ -786,7 +996,33 @@ fn start_configured(
                 );
                 continue;
             }
+            if matches!(method, Method::Get | Method::Head)
+                && path.starts_with("/api/podcast-media/")
+            {
+                podcast_sessions.serve(
+                    request,
+                    &path[19..],
+                    &store.devices,
+                    (mode, include_podcasts),
+                    worker_stop.clone(),
+                    streams.clone(),
+                );
+                continue;
+            }
             if method == Method::Post && path == "/api/pair" {
+                if !pairing_transport
+                    || mode != ShareMode::Library
+                    || !include_video
+                    || !include_podcasts
+                {
+                    reply(
+                        request,
+                        403,
+                        "Choose Pair phone in desktop Devices to share the full collection over Tailscale.",
+                        "text/plain",
+                    );
+                    continue;
+                }
                 let pair: Pair = match read_json(&mut request) {
                     Ok(p) => p,
                     Err(e) => {
@@ -794,27 +1030,37 @@ fn start_configured(
                         continue;
                     }
                 };
-                let mut pairing = worker_pairing.lock().unwrap_or_else(|e| e.into_inner());
+                let mut sharing = worker_share.lock().unwrap_or_else(|e| e.into_inner());
+                if sharing.revision != current_revision {
+                    reply(
+                        request,
+                        409,
+                        "Sharing changed. Scan the current desktop QR again.",
+                        "text/plain",
+                    );
+                    continue;
+                }
+                let pairing = &mut sharing.pairing;
                 if !pairing.accepts(&pair.code) {
                     pairing.failures = pairing.failures.saturating_add(1);
-                    drop(pairing);
+                    drop(sharing);
                     reply(
                         request,
                         403,
-                        "Pairing code expired, already used, or incorrect. Choose New pairing QR in desktop Devices and scan again.",
+                        "Pairing code expired, already used, or incorrect. Choose Pair phone in desktop Devices and scan again.",
                         "text/plain",
                     );
                     continue;
                 }
                 let secret = token();
                 let digest = hash(&secret);
-                let mut grant = selection.clone();
+                let mut grant = (*selection).clone();
                 grant.name = pair.name.chars().take(60).collect();
                 store.devices.insert(digest.clone(), grant);
                 match persist(&state, &store) {
                     Ok(()) => {
                         pairing.code = None;
-                        drop(pairing);
+                        drop(sharing);
                         reply_headers(
                             request,
                             200,
@@ -825,7 +1071,7 @@ fn start_configured(
                     }
                     Err(e) => {
                         store.devices.remove(&digest);
-                        drop(pairing);
+                        drop(sharing);
                         reply(request, 500, e, "text/plain");
                     }
                 }
@@ -857,6 +1103,23 @@ fn start_configured(
                     403,
                     "Full music library sharing is off. Enable it in desktop Devices to reconnect this pairing.",
                     "text/plain",
+                );
+                continue;
+            }
+            if companion::route(&path) {
+                let snapshot = worker_live
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
+                companion::serve(
+                    request,
+                    &path,
+                    &digest,
+                    store.devices.get_mut(&digest).unwrap(),
+                    (mode, include_podcasts),
+                    &snapshot,
+                    &callback,
+                    &mut podcast_sessions,
                 );
                 continue;
             }
@@ -990,7 +1253,7 @@ fn start_configured(
                 match persist(&state, &store) {
                     Ok(()) => {
                         for (path, position) in callbacks {
-                            callback(path, position);
+                            callback(Change::legacy(path, position));
                         }
                         json(request, 200, serde_json::json!({"ack":ack}));
                     }
@@ -1014,16 +1277,64 @@ fn start_configured(
         track_count,
         skipped,
         include_video,
+        include_podcasts,
+        live,
+        _migration_guard: migration_guard,
         server,
         stop,
         thread: Some(thread),
-        pairing,
+        sharing,
+        remembered,
+        route,
     })
+}
+
+fn valid_authority(request: &Request, origin: &str, proxied: bool) -> bool {
+    let expected = origin.strip_prefix("https://");
+    if proxied {
+        header(request, "Host").as_deref() == Some("localhost")
+            && header(request, "X-Forwarded-Host").as_deref() == expected
+            && header(request, "X-Forwarded-Proto").as_deref() == Some("https")
+            && header(request, "Tailscale-Funnel-Request").is_none()
+    } else {
+        header(request, "Host").as_deref() == expected
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_phone_can_pair_before_the_first_import() {
+        let (grant, skipped) =
+            library_selection(&crate::state::Library::default(), true, true).unwrap();
+        assert_eq!(grant.mode, ShareMode::Library);
+        assert!(grant.includes_video && grant.includes_podcasts);
+        assert_eq!(skipped, 0);
+    }
+    #[test]
+    fn public_install_icons_accept_discovery_aliases_without_exposing_api_routes() {
+        let (touch, mime) = mobile_icon("/gnune-touch-icon-180-v1.png").unwrap();
+        assert_eq!(mime, "image/png");
+        assert_eq!(&touch[..8], b"\x89PNG\r\n\x1a\n");
+        assert_eq!(u32::from_be_bytes(touch[16..20].try_into().unwrap()), 180);
+        assert_eq!(u32::from_be_bytes(touch[20..24].try_into().unwrap()), 180);
+        for path in [
+            "/apple-touch-icon.png",
+            "/apple-touch-icon-precomposed.png?probe=1",
+        ] {
+            assert_eq!(mobile_icon(path), Some((touch, mime)));
+        }
+        assert_eq!(mobile_icon("/favicon.ico?v=1").unwrap().1, "image/x-icon");
+        for path in [
+            "/api/manifest",
+            "/api/resume?token=example",
+            "/audio/track",
+            "/",
+        ] {
+            assert!(mobile_icon(path).is_none());
+        }
+    }
     fn fixture_track(dir: &std::path::Path, id: &str, number: u32) -> Track {
         let path = dir.join(format!("{id}.mp3"));
         fs::write(&path, b"fixture audio bytes").unwrap();
@@ -1109,6 +1420,10 @@ mod tests {
         )
         .unwrap();
         current.includes_video = true;
+        current.includes_podcasts = true;
+        current
+            .podcasts
+            .insert("new-show".into(), "https://example.com/feed.xml".into());
         let mut store = Store {
             devices: BTreeMap::from([
                 ("queue".into(), queue.clone()),
@@ -1121,6 +1436,10 @@ mod tests {
         assert_eq!(store.devices["library"].tracks.len(), 2);
         assert_eq!(store.devices["library"].scope, library.scope);
         assert!(!store.devices["library"].includes_video);
+        assert!(!store.devices["library"].includes_podcasts);
+        assert!(store.devices["library"].podcasts.is_empty());
+        assert!(!store.devices["queue"].includes_podcasts);
+        assert!(store.devices["queue"].podcasts.is_empty());
         store.devices.get_mut("library").unwrap().includes_video = true;
         current.includes_video = false;
         refresh_library_grants(&mut store, &current);
@@ -1147,19 +1466,77 @@ mod tests {
         assert!(resume_cookie("").ends_with("Max-Age=0"));
     }
     #[test]
+    fn new_pairings_require_private_tailscale_https_instead_of_legacy_lan() {
+        let mut connection = settings::Connection {
+            bind: "127.0.0.1:443".parse().unwrap(),
+            origin: "https://pc.example.ts.net".into(),
+            cert: PathBuf::new(),
+            key: PathBuf::new(),
+            serve_socket: Some(PathBuf::from("/tmp/gnune-private/serve.sock")),
+        };
+        assert!(connection.is_tailscale());
+        for origin in [
+            "https://192.0.2.1:8443",
+            "https://gnune.local",
+            "http://pc.example.ts.net",
+            "https://pc.example.ts.net.evil.example",
+        ] {
+            connection.origin = origin.into();
+            assert!(!connection.is_tailscale());
+        }
+        connection.origin = "https://pc.example.ts.net".into();
+        connection.serve_socket = None;
+        assert!(!connection.is_tailscale());
+    }
+    #[test]
+    fn explicit_repair_replaces_the_selection_and_code_together() {
+        let mut sharing = ActiveShare {
+            selection: Arc::new(Grant {
+                scope: "old-queue".into(),
+                ..Grant::default()
+            }),
+            revision: 0,
+            pairing: Pairing::new("old-code".into()),
+        };
+        sharing.replace(
+            Grant {
+                scope: "full-collection".into(),
+                mode: ShareMode::Library,
+                includes_video: true,
+                includes_podcasts: true,
+                ..Grant::default()
+            },
+            "new-code".into(),
+        );
+        assert_eq!(sharing.revision, 1);
+        assert_eq!(sharing.selection.scope, "full-collection");
+        assert_eq!(sharing.selection.mode, ShareMode::Library);
+        assert!(sharing.selection.includes_video && sharing.selection.includes_podcasts);
+        assert!(!sharing.pairing.accepts("old-code"));
+        assert!(sharing.pairing.accepts("new-code"));
+        sharing.replace((*sharing.selection).clone(), "another-code".into());
+        assert_eq!(sharing.revision, 2);
+        assert!(!sharing.pairing.accepts("new-code"));
+        assert!(sharing.pairing.accepts("another-code"));
+    }
+    #[test]
     fn pairing_tokens_expire_are_single_use_and_can_be_renewed() {
         let mut pairing = Pairing::new("first".into());
+        assert_eq!(pairing.status(), PairingStatus::Ready);
         assert!(pairing.accepts("first"));
         assert!(!pairing.accepts("wrong"));
         pairing.code = None;
+        assert_eq!(pairing.status(), PairingStatus::Used);
         assert!(!pairing.accepts("first"));
         pairing = Pairing::new("second".into());
         assert!(!pairing.accepts("first"));
         assert!(pairing.accepts("second"));
         pairing.expires = Instant::now() - Duration::from_secs(1);
+        assert_eq!(pairing.status(), PairingStatus::Expired);
         assert!(!pairing.accepts("second"));
         pairing = Pairing::new("third".into());
         pairing.failures = 30;
+        assert_eq!(pairing.status(), PairingStatus::Limited);
         assert!(!pairing.accepts("third"));
         pairing = Pairing::new("fourth".into());
         assert!(pairing.accepts("fourth"));
@@ -1197,5 +1574,44 @@ mod tests {
             serde_json::from_str::<Store>(&raw).unwrap().devices.len(),
             1
         );
+    }
+}
+
+#[cfg(test)]
+mod proxy_tests {
+    use super::*;
+    fn request(headers: &[(&str, &str)]) -> Request {
+        headers
+            .iter()
+            .fold(tiny_http::TestRequest::new(), |request, (name, value)| {
+                request.with_header(Header::from_bytes(*name, *value).unwrap())
+            })
+            .into()
+    }
+    #[test]
+    fn private_serve_requires_exact_forwarded_origin_https_and_never_funnel() {
+        let origin = "https://fixture.example.ts.net:8443";
+        let good = [
+            ("Host", "localhost"),
+            ("X-Forwarded-Host", "fixture.example.ts.net:8443"),
+            ("X-Forwarded-Proto", "https"),
+        ];
+        assert!(valid_authority(&request(&good), origin, true));
+        assert!(!valid_authority(&request(&good), origin, false));
+        assert!(!valid_authority(&request(&good[..2]), origin, true));
+        let mut wrong = good.to_vec();
+        wrong[1].1 = "other.example.ts.net:8443";
+        assert!(!valid_authority(&request(&wrong), origin, true));
+        wrong = good.to_vec();
+        wrong[2].1 = "http";
+        assert!(!valid_authority(&request(&wrong), origin, true));
+        wrong = good.to_vec();
+        wrong.push(("Tailscale-Funnel-Request", "?1"));
+        assert!(!valid_authority(&request(&wrong), origin, true));
+        assert!(valid_authority(
+            &request(&[("Host", "fixture.example.ts.net:8443")]),
+            origin,
+            false
+        ));
     }
 }

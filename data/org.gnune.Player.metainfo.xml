@@ -18,6 +18,17 @@
   <url type="bugtracker">https://github.com/ricperry/Gnune/issues</url>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.3.0" date="2026-11-22">
+      <description>
+        <p>Discover and subscribe to podcasts, stream or download episodes, choose
+        listening order and resume from Quickplay.</p>
+        <p>Share music, videos and podcasts with phones over Tailscale HTTPS,
+        including listening progress and phone Quickplay. Sharing requires
+        separate host setup; Flatpak uses its own settings.</p>
+        <p>Adds visible window controls, a rewind button and refreshed Smart DJ
+        artist suggestions.</p>
+      </description>
+    </release>
     <release version="0.2.0" date="2026-11-22">
       <description>
         <p>Browse and play your music collection on a paired phone, with optional

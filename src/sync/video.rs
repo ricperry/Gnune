@@ -20,7 +20,7 @@ pub(super) struct VideoMetadata {
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct VideoFile {
     metadata: VideoMetadata,
-    path: PathBuf,
+    pub(super) path: PathBuf,
     identity: FileIdentity,
 }
 
@@ -174,7 +174,7 @@ impl Sessions {
             reply(
                 request,
                 403,
-                "Video sharing is off. Include collection videos in desktop Devices and pair with that QR.",
+                "Video access is unavailable for this pairing. Choose Pair phone in desktop Devices and pair again with the new Tailscale QR.",
                 "text/plain",
             );
             return;

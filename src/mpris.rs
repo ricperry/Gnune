@@ -84,7 +84,14 @@ fn metadata(u: &Ui) -> BTreeMap<String, glib::Variant> {
         if let Some(number) = track.disc_number {
             values.insert("xesam:discNumber".into(), (number as i32).to_variant());
         }
-        if let Ok(url) = url::Url::from_file_path(&track.path) {
+        if let Some(uri) = u
+            .media
+            .borrow()
+            .as_ref()
+            .and_then(|media| media.stream_uri.clone())
+        {
+            values.insert("xesam:url".into(), uri.to_variant());
+        } else if let Ok(url) = url::Url::from_file_path(&track.path) {
             values.insert("xesam:url".into(), url.as_str().to_variant());
         }
         if let Some(path) = u.playback_artwork()

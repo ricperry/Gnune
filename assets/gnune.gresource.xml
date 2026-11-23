@@ -2,5 +2,6 @@
 <gresources>
   <gresource prefix="/org/gnune/Player/icons">
     <file alias="512x512/apps/org.gnune.Player.png">gnuneIconDraft2.png</file>
+    <file alias="scalable/actions/gnune-rewind-10-symbolic.svg">icons/gnune-rewind-10-symbolic.svg</file>
   </gresource>
 </gresources>

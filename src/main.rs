@@ -6,8 +6,9 @@ mod image_loader;
 mod media;
 mod motion;
 mod mpris;
-mod photos;
 mod playhead;
+mod podcast_collection;
+mod podcasts;
 mod recognition;
 mod screens;
 mod showcase;
@@ -46,6 +47,8 @@ enum Page {
     Showcase,
     Devices,
     Video,
+    Podcast(String),
+    PodcastNow,
 }
 enum Event {
     SaveError(String),
@@ -53,9 +56,13 @@ enum Event {
     VideoTags(Vec<(PathBuf, recognition::VideoTags)>),
     Scan(Vec<Track>, Vec<PathBuf>, Vec<String>, bool),
     Details(PathBuf, enrichment::Details),
-    Feed(String, Result<Vec<media::Episode>, String>),
+    Feed(String, Result<media::PodcastFeed, String>),
+    PodcastCatalog(Result<(String, podcasts::Catalog), String>),
+    CachedPodcast(String, media::PodcastFeed),
+    PodcastCover(String, String, Result<PathBuf, String>),
     Podcast(String, Result<PathBuf, String>),
-    Progress(PathBuf, f64),
+    PodcastDownloaded(podcasts::EpisodeId, String, Result<PathBuf, String>),
+    Phone(sync::Change),
 }
 #[derive(PartialEq)]
 enum Surface {
@@ -130,10 +137,27 @@ struct Ui {
     last_error: RefCell<Option<String>>,
     server: RefCell<Option<sync::Session>>,
     sharing_pending: Cell<bool>,
+    sharing_checkpoint: Cell<Instant>,
     sharing_retry: Cell<Option<Instant>>,
     sharing_retry_delay: Cell<u64>,
     sharing_problem: RefCell<Option<String>>,
     feeds: RefCell<HashMap<String, Vec<media::Episode>>>,
+    podcast_browser: RefCell<podcasts::Browse>,
+    podcast_jobs: RefCell<HashSet<String>>,
+    podcast_read_queue: RefCell<std::collections::VecDeque<(String, bool, bool)>>,
+    podcast_subscriptions: RefCell<HashSet<String>>,
+    podcast_grid: RefCell<Option<Rc<podcast_collection::Gallery>>>,
+    podcast_show: RefCell<Option<Rc<podcast_collection::Show>>>,
+    podcast_metadata_attempted: RefCell<HashSet<String>>,
+    podcast_refreshed: RefCell<HashMap<String, Instant>>,
+    podcast_latest_pending: RefCell<Option<String>>,
+    podcast_resume_pending: RefCell<Option<podcasts::EpisodeId>>,
+    podcast_progress_saved: Cell<Instant>,
+    podcast_progress_dirty: Cell<bool>,
+    quickplay_tier: Cell<u8>,
+    smart_dj_rotation: RefCell<screens::SmartDjRotation>,
+    podcast_cover_jobs: RefCell<HashSet<String>>,
+    podcast_cover_attempted: RefCell<HashSet<String>>,
     busy_enrich: Cell<bool>,
     protect: bool,
 }
@@ -264,6 +288,7 @@ fn build(app: &gtk::Application) -> Option<Rc<Ui>> {
     bar.add_css_class("transport");
     root.append(&bar);
     let devices = icon("phone-symbolic", "Devices");
+    devices.update_property(&[gtk::accessible::Property::Label("Devices")]);
     let queue = icon("view-list-symbolic", "Up next");
     let shortcuts = row(2);
     shortcuts.add_css_class("shortcuts");
@@ -312,11 +337,14 @@ fn build(app: &gtk::Application) -> Option<Rc<Ui>> {
     bar.append(&times);
     bar.append(&gap());
     let prev = icon("media-skip-backward-symbolic", "Previous track");
+    let rewind = icon("gnune-rewind-10-symbolic", "Rewind 10 seconds");
+    rewind.add_css_class("rewind");
+    rewind.update_property(&[gtk::accessible::Property::Label("Rewind 10 seconds")]);
     let play = icon("media-playback-start-symbolic", "Play or pause");
     let next = icon("media-skip-forward-symbolic", "Next track");
     let transport_buttons = row(4);
     transport_buttons.set_valign(gtk::Align::Center);
-    for b in [&prev, &play, &next] {
+    for b in [&prev, &rewind, &play, &next] {
         b.add_css_class("round");
         b.set_valign(gtk::Align::Center);
         transport_buttons.append(b);
@@ -364,7 +392,11 @@ fn build(app: &gtk::Application) -> Option<Rc<Ui>> {
         }
     });
     let protect = problem.is_some();
-    let first_page = if db.tracks.is_empty() {
+    let first_page = if db.tracks.is_empty()
+        && db.feeds.is_empty()
+        && db.assets.is_empty()
+        && db.last_podcast.is_none()
+    {
         Page::Collection("artists".into())
     } else {
         Page::Quick
@@ -432,10 +464,27 @@ fn build(app: &gtk::Application) -> Option<Rc<Ui>> {
         last_error: Default::default(),
         server: Default::default(),
         sharing_pending: Cell::new(false),
+        sharing_checkpoint: Cell::new(Instant::now()),
         sharing_retry: Cell::new(None),
         sharing_retry_delay: Cell::new(5),
         sharing_problem: Default::default(),
         feeds: Default::default(),
+        podcast_browser: Default::default(),
+        podcast_jobs: Default::default(),
+        podcast_read_queue: Default::default(),
+        podcast_subscriptions: Default::default(),
+        podcast_grid: Default::default(),
+        podcast_show: Default::default(),
+        podcast_metadata_attempted: Default::default(),
+        podcast_refreshed: Default::default(),
+        podcast_latest_pending: Default::default(),
+        podcast_resume_pending: Default::default(),
+        podcast_progress_saved: Cell::new(Instant::now()),
+        podcast_progress_dirty: Cell::new(false),
+        quickplay_tier: Cell::new(0),
+        smart_dj_rotation: Default::default(),
+        podcast_cover_jobs: Default::default(),
+        podcast_cover_attempted: Default::default(),
         busy_enrich: Cell::new(false),
         protect,
     });
@@ -445,8 +494,18 @@ fn build(app: &gtk::Application) -> Option<Rc<Ui>> {
         let _ = v.set_playback_volume(n * 100.);
         v.db.borrow_mut().volume = Some(n * 100.);
     });
+    action(&u, &rewind, |ui| {
+        let position = ui.playback_state().position;
+        ui.command(ui.seek_playback((position - 10.).max(0.)));
+    });
     action(&u, &prev, |v| {
-        if v.pos.get() > 3. {
+        if v.media
+            .borrow()
+            .as_ref()
+            .is_some_and(|media| media.podcast_id.is_some())
+        {
+            v.command(v.previous_playback());
+        } else if v.pos.get() > 3. {
             v.command(v.seek_playback(0.));
         } else {
             v.command(v.previous_playback());
@@ -459,7 +518,7 @@ fn build(app: &gtk::Application) -> Option<Rc<Ui>> {
         v.command(v.seek_playback(n));
         glib::Propagation::Proceed
     });
-    action(&u, &devices, |u| u.navigate(Page::Devices));
+    action(&u, &devices, |u| u.show_devices());
     action(&u, &queue, |u| u.navigate(Page::Queue));
     action(&u, &listening, |u| u.navigate(Page::Now));
     action(&u, &u.back, |u| u.go_back());
@@ -467,7 +526,6 @@ fn build(app: &gtk::Application) -> Option<Rc<Ui>> {
     for (s, p) in [
         ("quickplay", Page::Quick),
         ("collection", Page::Collection("artists".into())),
-        ("device", Page::Devices),
         ("now playing", Page::Now),
     ] {
         let link = app_button(&u, s, move |u| u.go(p.clone()));
@@ -564,39 +622,16 @@ fn build(app: &gtk::Application) -> Option<Rc<Ui>> {
         v.toggle_mini();
     });
     opts.append(&u.mini_action);
-    app.add_action(&gio::SimpleAction::new_stateful(
-        "include-share-videos",
-        None,
-        &false.to_variant(),
-    ));
-    for name in ["share-queue", "share-library", "copy-pairing-link"] {
+    for name in ["pair-phone", "copy-pairing-link", "show-devices"] {
         let a = gio::SimpleAction::new(name, None);
         let v = u.clone();
         a.connect_activate(move |_, _| match name {
-            "share-queue" => v.share_queue(),
-            "share-library" => v.share_library(),
+            "pair-phone" => v.pair_phone(),
+            "show-devices" => v.show_devices(),
             _ => v.copy_pairing_link(),
         });
         app.add_action(&a);
     }
-    let resume = gio::SimpleAction::new("resume-from-phone", Some(glib::VariantTy::STRING));
-    let v = u.clone();
-    resume.connect_activate(move |_, value| {
-        if let Some(id) = value.and_then(|s| s.str()) {
-            let selected = {
-                let db = v.db.borrow();
-                db.tracks
-                    .iter()
-                    .find(|t| t.id == id)
-                    .and_then(|t| db.phone_progress.get(&t.path).map(|pos| (t.clone(), *pos)))
-            };
-            if let Some((track, pos)) = selected {
-                v.start(vec![track], 0, Some(pos));
-                v.go(Page::Now);
-            }
-        }
-    });
-    app.add_action(&resume);
     let fullscreen = gio::SimpleAction::new("fullscreen", None);
     let v = u.clone();
     fullscreen.connect_activate(move |_, _| v.fullscreen());
@@ -753,6 +788,9 @@ fn build(app: &gtk::Application) -> Option<Rc<Ui>> {
 }
 impl Ui {
     fn persist(&self) {
+        if let Some(server) = self.server.borrow().as_ref() {
+            server.publish(&self.db.borrow());
+        }
         if !self.protect
             && let Err(e) = self.writer.save(&self.db.borrow())
         {
@@ -760,6 +798,9 @@ impl Ui {
         }
     }
     fn persist_playback(&self) {
+        if let Some(server) = self.server.borrow().as_ref() {
+            server.publish(&self.db.borrow());
+        }
         if !self.protect
             && let Err(e) = self.writer.playback_changed(&self.db.borrow())
         {
@@ -780,13 +821,28 @@ impl Ui {
     }
     fn playback_page(&self, page: Page) -> Page {
         if page == Page::Now && self.media.borrow().is_some() {
-            Page::Video
+            self.media
+                .borrow()
+                .as_ref()
+                .and_then(|media| media.show_feed.as_ref())
+                .map_or(Page::Video, |_| Page::PodcastNow)
         } else {
             page
         }
     }
+    fn prepare_page(&self, page: &Page) {
+        if *page == Page::Devices
+            && let Some(session) = self.server.borrow_mut().as_mut()
+            && session.can_pair_phone()
+        {
+            session.prepare_pairing();
+        } else if *page == Page::Quick && *self.page.borrow() != Page::Quick {
+            self.smart_dj_rotation.borrow_mut().request_next();
+        }
+    }
     fn go(self: &Rc<Self>, p: Page) {
         let p = self.playback_page(p);
+        self.prepare_page(&p);
         if p == Page::Video && self.mini.get() {
             self.toggle_mini();
         }
@@ -815,7 +871,9 @@ impl Ui {
             history.pop();
         }
         if let Some(page) = history.pop() {
-            self.page.replace(self.playback_page(page));
+            let page = self.playback_page(page);
+            self.prepare_page(&page);
+            self.page.replace(page);
             self.filters.borrow_mut().clear();
             self.back.set_sensitive(!history.is_empty());
             drop(history);
@@ -1012,15 +1070,8 @@ impl Ui {
                     self.show_asset(&assets[0]);
                 } else if !tracks.is_empty() {
                     self.go(Page::Collection("artists".into()))
-                } else if let Some(p) = assets.first() {
-                    self.go(Page::Collection(
-                        if media::is_photo_path(p) {
-                            "photos"
-                        } else {
-                            "videos"
-                        }
-                        .into(),
-                    ));
+                } else if !assets.is_empty() {
+                    self.go(Page::Collection("videos".into()));
                 } else {
                     self.notice("No supported media found.");
                 }
@@ -1044,16 +1095,63 @@ impl Ui {
                 }
                 self.enrich();
             }
-            Event::Feed(feed, result) => match result {
-                Ok(items) => {
-                    self.feeds.borrow_mut().insert(feed, items);
-                    self.notice("");
-                    if matches!(*self.page.borrow(),Page::Collection(ref s) if s=="podcasts") {
+            Event::Feed(feed, result) => self.podcast_feed_result(feed, result),
+            Event::CachedPodcast(feed, podcast) => {
+                if !self.feeds.borrow().contains_key(&feed) {
+                    if podcasts::contains_feed(&self.db.borrow().feeds, &feed) {
+                        let mut db = self.db.borrow_mut();
+                        let show = db.podcast_shows.entry(feed.clone()).or_default();
+                        if show.title.is_empty() {
+                            show.title = podcast.show.title.clone();
+                        }
+                        if show.publisher.is_empty() {
+                            show.publisher = podcast.show.publisher.clone();
+                        }
+                        if show.summary.is_empty() {
+                            show.summary = podcast.show.summary.clone();
+                        }
+                        if show.image.is_none() {
+                            show.image = podcast.show.image.clone();
+                        }
+                    }
+                    self.feeds
+                        .borrow_mut()
+                        .insert(feed.clone(), podcast.episodes);
+                    self.refresh_podcast_views(&feed);
+                    self.finish_podcast_resume(&feed, false);
+                }
+            }
+            Event::PodcastCover(feed, image, result) => {
+                self.podcast_cover_jobs.borrow_mut().remove(&image);
+                if let Err(error) = result
+                    && matches!(&*self.page.borrow(), Page::Podcast(active) if active == &feed)
+                {
+                    self.notice(&format!("Podcast cover unavailable: {error}"));
+                }
+                self.refresh_podcast_views(&feed);
+                self.refresh_podcast_browser_covers();
+                if self
+                    .media
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|media| media.show_feed.as_deref() == Some(&feed))
+                {
+                    self.update_cover();
+                    if *self.page.borrow() == Page::PodcastNow {
                         self.render();
                     }
                 }
-                Err(e) => self.notice(&e),
-            },
+            }
+            Event::PodcastCatalog(result) => self.podcast_catalog_result(result),
+            Event::PodcastDownloaded(id, title, result) => {
+                if let Ok(path) = &result {
+                    self.db
+                        .borrow_mut()
+                        .podcast_downloads
+                        .insert(path.clone(), id);
+                }
+                self.event(Event::Podcast(title, result));
+            }
             Event::Podcast(title, result) => match result {
                 Ok(path) => {
                     self.db.borrow_mut().episodes.insert(title, path);
@@ -1063,19 +1161,36 @@ impl Ui {
                 }
                 Err(e) => self.notice(&e),
             },
-            Event::Progress(path, secs) => {
-                self.db
-                    .borrow_mut()
-                    .phone_progress
-                    .insert(path.clone(), secs);
-                self.persist();
-                self.notice(&format!(
-                    "Phone progress received for {} at {}",
-                    path.file_stem().unwrap_or_default().to_string_lossy(),
-                    time(secs)
-                ));
-                if *self.page.borrow() == Page::Devices {
-                    self.render();
+            Event::Phone(change) => {
+                if self.protect {
+                    change.reject("Collection saving is disabled; phone changes were not saved.");
+                    return;
+                }
+                let order = change.order_feed();
+                let original = self.db.borrow().clone();
+                let (mut result, reply) = change.apply(&mut self.db.borrow_mut());
+                if result.is_ok() {
+                    result = self
+                        .writer
+                        .save(&self.db.borrow())
+                        .map_err(|e| e.to_string());
+                }
+                if result.is_err() {
+                    *self.db.borrow_mut() = original;
+                }
+                if let Some(server) = self.server.borrow().as_ref() {
+                    server.publish(&self.db.borrow());
+                }
+                if result.is_ok() {
+                    if let Some(feed) = order {
+                        self.reorder_playing_podcast(&feed);
+                        self.refresh_podcast_views(&feed);
+                    } else if *self.page.borrow() == Page::Quick {
+                        self.render();
+                    }
+                }
+                if let Some(reply) = reply {
+                    let _ = reply.send(result);
                 }
             }
         }
@@ -1116,6 +1231,14 @@ impl Ui {
             .or_else(|| enrichment::cached_cover(t, &data_dir().join("online")))
     }
     fn enrich(&self) {
+        if self
+            .media
+            .borrow()
+            .as_ref()
+            .is_some_and(|media| media.stream_uri.is_some())
+        {
+            return;
+        }
         let Some(t) = self.current() else { return };
         if !self.db.borrow().enrichment
             || self.busy_enrich.get()
@@ -1176,6 +1299,8 @@ impl Ui {
         }
     }
     fn start(self: &Rc<Self>, mut list: Vec<Track>, mut n: usize, resume: Option<f64>) {
+        self.podcast_latest_pending.borrow_mut().take();
+        self.podcast_resume_pending.borrow_mut().take();
         if n >= list.len() {
             return;
         }
@@ -1354,6 +1479,7 @@ impl Ui {
         }
     }
     fn save_position(&self) {
+        self.capture_podcast_progress(&self.playback_state(), None);
         if let Some(path) = self.media.borrow().as_ref().map(|m| m.path.clone()) {
             let active = self.playback_state();
             self.db
@@ -1393,11 +1519,41 @@ impl Ui {
             if let Some(browser) = self.browser.borrow().upgrade() {
                 browser.set_compact(compact);
             }
-            if matches!(*self.page.borrow(), Page::Now | Page::Wall | Page::Showcase) {
+            if matches!(
+                *self.page.borrow(),
+                Page::Now
+                    | Page::Wall
+                    | Page::Showcase
+                    | Page::PodcastNow
+                    | Page::Quick
+                    | Page::Devices
+            ) {
                 self.render();
             }
         }
+        if *self.page.borrow() == Page::Quick
+            && self.quickplay_tier.get() != self.quickplay_dimensions().0
+        {
+            self.render();
+        }
         let s = self.playback_state();
+        if self.server.borrow().is_some()
+            && !s.paused
+            && !s.finished
+            && self.sharing_checkpoint.get().elapsed() >= Duration::from_secs(2)
+        {
+            self.sharing_checkpoint.set(Instant::now());
+            self.save_position();
+            self.persist_playback();
+        }
+        self.capture_podcast_progress(&s, None);
+        if self.podcast_progress_dirty.get()
+            && self.podcast_progress_saved.get().elapsed() >= Duration::from_secs(2)
+        {
+            self.podcast_progress_saved.set(Instant::now());
+            self.podcast_progress_dirty.set(false);
+            self.persist_playback();
+        }
         if s.finished && self.advance_finished_video() {
             return;
         }
@@ -1485,7 +1641,7 @@ impl Ui {
             && self.last_input.get().elapsed() > Duration::from_secs(4)
             && matches!(
                 *self.page.borrow(),
-                Page::Now | Page::Wall | Page::Showcase | Page::Video
+                Page::Now | Page::Wall | Page::Showcase | Page::Video | Page::PodcastNow
             )
         {
             self.bar.set_visible(false);

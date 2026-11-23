@@ -3,11 +3,14 @@ const $ = id => document.getElementById(id);
 const Catalog = globalThis.GnuneCatalog;
 let db, device, manifest, catalog = Catalog.build(null), pendingPair = '', needsPairing = false;
 let changingPairing = false;
-let audioKeys = new Set(), artKeys = [], currentTrack, currentVideo;
+let audioKeys = new Set(), artKeys = [], currentTrack, currentVideo, currentPodcast;
+let sharedState, sharedRefreshing = false, podcastQueue = [], podcastIndex = -1, progressStarted = false;
+const podcastShows = new Map();
+let activePodcastShow, activePodcastEpisodes = [], podcastOpenGeneration = 0;
 let playQueue = [], queueIndex = -1, videoQueue = [], videoIndex = -1;
 let lastSaved = 0, syncing = false, reconnecting = false, pendingCount = 0, showPlayer = false;
 let playGeneration = 0, mediaController, shuffle = false, repeat = false;
-let view = {pivot: 'artists', detail: null, offline: false, search: ''}, backStack = [], pageSize = 80;
+let view = {area: 'quickplay', pivot: 'artists', detail: null, offline: false, search: ''}, backStack = [], pageSize = 80;
 const audio = $('audio'), video = $('video');
 const artURLs = new Map(), artRequests = new Map(), artTasks = [];
 let artWorkers = 0;
@@ -92,6 +95,8 @@ async function api(path, options = {}, credential = device) {
   return response;
 }
 function acceptManifest(next) {
+  if (!next) { sharedState = undefined; podcastShows.clear(); activePodcastShow = undefined; activePodcastEpisodes = []; podcastQueue = []; podcastIndex = -1; }
+  if (manifest && next && manifest.scope !== next.scope) { sharedState = undefined; podcastShows.clear(); }
   manifest = next;
   catalog = Catalog.build(next);
 }
@@ -102,6 +107,7 @@ async function refresh() {
   if (changingPairing || device?.token !== credential.token) return;
   await write('settings', 'manifest', next);
   acceptManifest(next);
+  await refreshShared();
   render();
 }
 function saveNavigation() {
@@ -135,7 +141,7 @@ function renderSummary() {
 }
 const currentMedia = () => currentVideo ? video : audio;
 function renderPlayer() {
-  const track = currentVideo || currentTrack;
+  const track = currentVideo || currentPodcast || currentTrack;
   $('mini-player').hidden = !track || showPlayer;
   $('player').hidden = !track || !showPlayer;
   $('library').hidden = !manifest || showPlayer;
@@ -152,13 +158,14 @@ function renderPlayer() {
   $('now-cover').hidden = Boolean(currentVideo);
   $('now-cover').replaceChildren(cover(track.art));
   $('mini-art').replaceChildren(cover(track.art));
-  const count = currentVideo ? videoQueue.length : playQueue.length;
-  const index = currentVideo ? videoIndex : queueIndex;
+  const count = currentVideo ? videoQueue.length : currentPodcast ? podcastQueue.length : playQueue.length;
+  const index = currentVideo ? videoIndex : currentPodcast ? podcastIndex : queueIndex;
   const transferNote = currentVideo
     ? 'video streams while playing; no offline video download'
+    : currentPodcast ? 'podcast streams while playing; no automatic download'
     : 'only the playing song transfers; played songs are saved when storage allows';
   $('queue-summary').textContent = `${index + 1} of ${count} · ${transferNote}`;
-  $('shuffle').hidden = Boolean(currentVideo);
+  $('shuffle').hidden = Boolean(currentVideo || currentPodcast);
   $('repeat').setAttribute('aria-pressed', String(repeat));
   $('shuffle').setAttribute('aria-pressed', String(shuffle));
 }
@@ -168,15 +175,22 @@ function render() {
   $('cancel-pair').hidden = !device || (!pendingPair && !changingPairing);
   $('manual-pairing').open = !pendingPair;
   $('pair-help').textContent = changingPairing
-    ? 'Paste a fresh desktop pairing link below. Your current pairing stays active until this succeeds.'
-    : pendingPair ? 'Your link is ready. Tap Pair phone.' : 'Scan the QR in desktop Devices or enter its link below.';
+    ? 'Choose Pair phone in desktop Devices, then paste its fresh Tailscale link below. Your current pairing stays active until this succeeds.'
+    : pendingPair ? 'Your link is ready. Tap Pair phone.' : 'Connect Tailscale, then scan the QR in desktop Devices or enter its link below.';
   $('scope-label').textContent = manifest?.mode === 'library' ? 'your desktop collection' : 'shared desktop queue';
   $('connection').textContent = device ? 'paired to your desktop' : 'on your phone';
   $('settings').hidden = !device;
   for (const button of document.querySelectorAll('[data-pivot]')) {
     button.setAttribute('aria-current', button.dataset.pivot === view.pivot ? 'page' : 'false');
-    if (button.dataset.pivot.startsWith('video')) button.hidden = !manifest?.includes_video;
+    button.hidden = false;
   }
+  $('area-title').textContent = view.area || 'music';
+  $('library').dataset.area = view.area || 'music';
+  $('library').dataset.detail = view.detail ? 'true' : 'false';
+  $('pivots').hidden = (view.area || 'music') !== 'music';
+  $('video-pivots').hidden = view.area !== 'videos';
+  for (const button of document.querySelectorAll('[data-area]')) button.setAttribute('aria-current', button.dataset.area === view.area ? 'page' : 'false');
+  $('offline-filter').hidden = ['podcasts', 'videos', 'quickplay'].includes(view.area);
   $('offline-filter').setAttribute('aria-pressed', String(view.offline));
   $('search').value = view.search;
   renderPlayer();
@@ -206,9 +220,14 @@ function trackButton(track, tracks, index, isVideo = false) {
 }
 let pageObserver;
 function renderBrowse() {
+  if (view.area === 'quickplay') { renderQuickplay(); return; }
+  if (view.area === 'podcasts') { renderPodcasts(); return; }
+  if (view.area === 'videos' && !manifest.includes_video) { disabledArea('videos'); return; }
   const result = visible();
   $('view-title').textContent = result.title;
   $('view-subtitle').textContent = result.subtitle;
+  $('album-pin').hidden = result.kind !== 'tracks' || view.detail?.type !== 'album' || manifest.mode !== 'library' || !sharedState;
+  if (!$('album-pin').hidden) { const pinned=(sharedState.pins||[]).some(p=>p.id===view.detail.id); $('album-pin').textContent=pinned?'unpin album':'pin album'; $('album-pin').onclick=()=>changePin(view.detail.id,!pinned).catch(fail); }
   $('back').hidden = !view.detail && backStack.length === 0;
   const playable = ['tracks', 'videos'].includes(result.kind);
   $('view-actions').hidden = !playable || result.items.length === 0;
@@ -245,7 +264,7 @@ function renderBrowse() {
       list.append(row);
     }
   }
-  if (!result.items.length) target.append(node('p', 'empty', view.offline ? 'No saved songs in this view. Play a song on Wi-Fi to save it here.' : 'No items in this view.'));
+  if (!result.items.length) target.append(node('p', 'empty', view.offline ? 'No saved songs in this view. Play a song while connected to save it here.' : 'No items in this view.'));
   else target.append(list);
   $('more').hidden = result.items.length <= pageSize;
   pageObserver?.disconnect();
@@ -317,13 +336,14 @@ async function pair() {
       tx.objectStore('settings').put(nextDevice, 'device');
       tx.objectStore('settings').delete('manifest');
       tx.objectStore('settings').delete('playback');
+      tx.objectStore('settings').delete('podcastPlayback');
     });
     stopPlayback();
     device = nextDevice; needsPairing = false;
     changingPairing = false;
     acceptManifest(undefined);
     rememberPair(''); $('pair-code').value = '';
-    view = {pivot: nextDevice.mode === 'library' ? 'artists' : 'songs', detail: null, offline: false, search: ''};
+    view = {area: 'quickplay', pivot: nextDevice.mode === 'library' ? 'artists' : 'songs', detail: null, offline: false, search: ''};
     backStack = [];
     render();
     await refresh();
@@ -337,7 +357,7 @@ function stopPlayback() {
   if (audio.src?.startsWith('blob:')) URL.revokeObjectURL(audio.src);
   audio.removeAttribute('src'); audio.load();
   video.removeAttribute('src'); video.load();
-  currentTrack = undefined; currentVideo = undefined;
+  currentTrack = undefined; currentVideo = undefined; currentPodcast = undefined;
   playQueue = []; videoQueue = []; queueIndex = -1; videoIndex = -1;
   showPlayer = false;
 }
@@ -360,7 +380,7 @@ async function play(index, queue = playQueue) {
   audio.pause(); video.pause();
   if (audio.src?.startsWith('blob:')) URL.revokeObjectURL(audio.src);
   audio.removeAttribute('src'); audio.load(); video.removeAttribute('src'); video.load();
-  playQueue = [...queue]; queueIndex = index; currentVideo = undefined; currentTrack = track;
+  playQueue = [...queue]; queueIndex = index; currentVideo = undefined; currentPodcast = undefined; currentTrack = track; track.conflicted = false; progressStarted = true;
   showPlayer = true;
   renderPlayer();
   const controller = new AbortController();
@@ -375,7 +395,7 @@ async function play(index, queue = playQueue) {
       if (!blob.size || blob.size !== track.bytes) throw new Error(`Incomplete transfer: ${track.title}. Tap to retry.`);
     }
     if (generation !== playGeneration) return;
-    const progress = await read('progress', progressKey(track));
+    const progress = await resumeProgress(track);
     if (generation !== playGeneration) return;
     if (audio.src?.startsWith('blob:')) URL.revokeObjectURL(audio.src);
     audio.src = URL.createObjectURL(blob);
@@ -385,6 +405,7 @@ async function play(index, queue = playQueue) {
     await saveQueue();
     try { await audio.play(); say(`Playing ${track.title}.`); }
     catch (_) { say('Ready to play. Tap the audio play control.'); }
+    saveProgress().then(() => sync(false)).catch(fail);
     if (!available(track)) {
       try {
         await write('audio', key(track), blob);
@@ -407,14 +428,27 @@ async function playVideo(index, queue = videoQueue) {
   const response = await api('/api/video-session', {method: 'POST', body: JSON.stringify({id: item.id})});
   if (generation !== playGeneration) return;
   const session = await response.json();
-  currentTrack = undefined; currentVideo = item; videoQueue = [...queue]; videoIndex = index;
+  const progress = await resumeProgress(item);
+  if (generation !== playGeneration) return;
+  currentTrack = undefined; currentPodcast = undefined; currentVideo = item; item.conflicted = false; progressStarted = true; videoQueue = [...queue]; videoIndex = index;
   video.src = session.url;
+  video.onloadedmetadata = () => restorePosition(video, progress);
   showPlayer = true;
   renderPlayer();
-  try { await video.play(); say(`Playing ${item.title}.`); }
+  try { await video.play(); say(`Playing ${item.title}.`); saveProgress().then(() => sync(false)).catch(fail); }
   catch (_) { say('Video ready. Tap its play control. Your phone must support the original video codec.'); }
 }
-async function adjacent(delta) {
+async function adjacent(delta, skipCompleted = false) {
+  if (currentPodcast) {
+    let index = podcastIndex + delta;
+    while (index >= 0 && index < podcastQueue.length) {
+      const item = activePodcastEpisodes.find(ep=>ep.id===podcastQueue[index]);
+      const local = item && await read('progress',progressKey(item));
+      if (!skipCompleted || !(local || item?.progress)?.completed) {await playPodcast(index);return;}
+      index += delta;
+    }
+    say('No more unplayed episodes.'); return;
+  }
   if (currentVideo) {
     let index = videoIndex + delta;
     if (repeat) index = (index + videoQueue.length) % videoQueue.length;
@@ -430,30 +464,40 @@ async function togglePlayback() {
   if (!media.paused) media.pause();
   else if (!media.getAttribute('src')) {
     if (currentVideo) await playVideo(videoIndex);
+    else if (currentPodcast) await playPodcast(podcastIndex);
     else await play(queueIndex);
   } else await media.play();
   renderPlayer();
 }
 async function saveProgress() {
-  if (!currentTrack || !device || !Number.isFinite(audio.currentTime) || !audio.getAttribute('src')) return;
-  const track = currentTrack, id = progressKey(track), completed = audio.ended;
-  const position = completed ? 0 : audio.currentTime, authToken = device.token;
+  const track = currentVideo || currentPodcast || currentTrack, media = currentMedia();
+  if (!track || track.conflicted || !device || !Number.isFinite(media.currentTime) || !media.getAttribute('src')) return;
+  const id = progressKey(track), completed = media.ended;
+  const position = completed ? 0 : media.currentTime, authToken = device.token;
+  const remote = track.progress || sharedState?.progress?.[track.id];
+  const started = progressStarted; progressStarted = false;
   await transaction(['settings', 'progress', 'pending'], tx => {
     const settings = tx.objectStore('settings'), request = settings.get(`sequence:${authToken}`);
     request.onsuccess = () => {
       const seq = (request.result || 0) + 1;
       settings.put(seq, `sequence:${authToken}`);
-      tx.objectStore('progress').put({position, completed}, id);
-      tx.objectStore('pending').put({key: id, token: authToken, seq, id: track.id, position, completed}, id);
+      const pending = tx.objectStore('pending'), previous = pending.get(id);
+      previous.onsuccess = () => {
+        const old = previous.result?.token === authToken ? previous.result : undefined;
+        const base = old?.base || remote?.revision;
+        tx.objectStore('progress').put({position, completed, revision: base}, id);
+        pending.put({key: id, token: authToken, seq, id: track.id, position, completed, base, history: Boolean(old?.history || started), last_base: old?.last_base || sharedState?.last_revision}, id);
+      };
     };
   });
   await updateSummary();
 }
-async function sync() {
+async function sync(capture = true) {
   if (syncing || !device) return;
   syncing = true; $('sync').disabled = true;
+  let conflict = Boolean((currentVideo || currentPodcast || currentTrack)?.conflicted);
   try {
-    await saveProgress();
+    if (capture) await saveProgress();
     const updates = await all('pending'), groups = new Map();
     for (const update of updates) {
       if (!groups.has(update.token)) groups.set(update.token, []);
@@ -463,14 +507,47 @@ async function sync() {
       records.sort((a, b) => a.seq - b.seq);
       for (let start = 0; start < records.length; start += 100) {
         const batch = records.slice(start, start + 100);
-        const updates = batch.map(({seq, id, position, completed}) => ({seq, id, position, completed}));
+        const modern = batch.filter(item => item.base);
+        for (const sent of modern) {
+          try {
+            const saved = await (await api('/api/state', {method: 'POST', body: JSON.stringify({action:'progress', id:sent.id, position:sent.position, completed:sent.completed, base:sent.base, history:sent.history, last_base:sent.last_base})}, {token})).json();
+            sent.accepted = saved.progress;
+            if (device?.token === token && sharedState && saved.progress) { sharedState.progress ||= {}; sharedState.progress[sent.id] = saved.progress; const current = currentVideo || currentPodcast || currentTrack; if (current?.id === sent.id) current.progress = saved.progress; }
+          } catch (error) {
+            if (error.status !== 409) throw error;
+            conflict = true;
+            const current = currentVideo || currentPodcast || currentTrack; if (current?.id === sent.id) current.conflicted = true;
+            say('A newer listening position was kept. Reopen the item to resume from it.');
+          }
+          await transaction(['pending', 'progress'], tx => {
+            const store = tx.objectStore('pending'), request = store.get(sent.key);
+            request.onsuccess = () => {
+              const pending = request.result;
+              if (pending?.token !== token) return;
+              if (pending.seq === sent.seq) store.delete(sent.key);
+              else if (pending.base === sent.base && sent.accepted) {
+                pending.base = sent.accepted.revision;
+                store.put(pending, sent.key);
+              }
+              if (sent.accepted) {
+                const progress = tx.objectStore('progress'), local = progress.get(sent.key);
+                local.onsuccess = () => {
+                  if (local.result) progress.put({...local.result, revision: sent.accepted.revision}, sent.key);
+                };
+              }
+            };
+          });
+        }
+        const legacy = batch.filter(item => !item.base);
+        if (!legacy.length) continue;
+        const updates = legacy.map(({seq, id, position, completed}) => ({seq, id, position, completed}));
         const response = await api('/api/progress', {
           method: 'POST', body: JSON.stringify({updates}),
         }, {token});
         const ack = await response.json();
         await transaction('pending', tx => {
           const store = tx.objectStore('pending');
-          for (const sent of batch) {
+          for (const sent of legacy) {
             const request = store.get(sent.key);
             request.onsuccess = () => {
               if (request.result?.seq === sent.seq && request.result?.token === token && ack.ack.includes(sent.seq)) store.delete(sent.key);
@@ -479,7 +556,9 @@ async function sync() {
         });
       }
     }
-    say('Listening progress returned to your desktop.');
+    await refreshShared();
+    if (conflict) say('A newer listening position was kept. Reopen the item to resume from it.');
+    else if (updates.length) say('Listening progress returned to your desktop.');
   } finally { syncing = false; $('sync').disabled = false; await updateSummary(); }
 }
 async function forget() {
@@ -550,14 +629,17 @@ async function reconnect() {
 }
 function bind(id, action) { $(id).onclick = () => Promise.resolve().then(action).catch(fail); }
 for (const media of [audio, video]) {
-  media.addEventListener('play', renderPlayer);
+  media.addEventListener('play', () => {
+    if (media === currentMedia()) progressStarted = true;
+    renderPlayer();
+  });
   media.addEventListener('pause', () => { saveProgress().catch(fail); renderPlayer(); });
-  media.addEventListener('ended', () => saveProgress().then(() => adjacent(1)).catch(fail));
+  media.addEventListener('ended', () => saveProgress().then(() => sync(false)).then(() => adjacent(1,true)).catch(fail));
 }
-audio.addEventListener('timeupdate', () => {
+for (const media of [audio, video]) media.addEventListener('timeupdate', () => {
   if (Date.now() - lastSaved > 5000) { lastSaved = Date.now(); saveProgress().catch(fail); }
 });
-audio.addEventListener('seeked', () => saveProgress().catch(fail));
+for (const media of [audio, video]) media.addEventListener('seeked', () => saveProgress().then(() => sync(false)).catch(fail));
 audio.addEventListener('error', () => say('This audio format could not play. Try an MP3, AAC, or FLAC original supported by your phone.'));
 video.addEventListener('error', () => say('This video could not play. Check desktop sharing and codec support; H.264/AAC MP4 is widely supported.'));
 document.addEventListener('visibilitychange', () => {
@@ -568,7 +650,7 @@ window.addEventListener('online', () => reconnect().catch(fail));
 for (const [id, action] of [
   ['pair', pair], ['sync', sync], ['refresh', refresh], ['forget', forget], ['unpair', unpair],
   ['previous', () => adjacent(-1)], ['next', () => adjacent(1)], ['mini-next', () => adjacent(1)],
-  ['mini-toggle', togglePlayback], ['back', back], ['player-back', back],
+  ['rewind', rewind], ['mini-toggle', togglePlayback], ['back', back], ['player-back', back],
 ]) bind(id, action);
 bind('change-pairing', () => {
   changingPairing = true;
@@ -590,7 +672,7 @@ bind('cancel-pair', () => {
 });
 bind('mini-open', () => { showPlayer = true; renderPlayer(); window.scrollTo?.({top: 0}); });
 bind('show-queue', () => navigate({detail: {type: currentVideo ? 'video-queue' : 'queue'}, search: ''}));
-bind('now-album', () => { if (currentTrack) navigate({pivot: 'albums', detail: {type: 'album', id: Catalog.albumId(currentTrack)}}); });
+bind('now-album', () => { if (currentPodcast) navigate({area:'podcasts',detail:{type:'podcast',id:currentPodcast.show}}); else if (currentTrack) navigate({area:'music',pivot: 'albums', detail: {type: 'album', id: Catalog.albumId(currentTrack)}}); });
 bind('offline-filter', () => { view.offline = !view.offline; pageSize = 80; saveNavigation(); render(); });
 bind('more', () => { pageSize += 80; renderBrowse(); });
 bind('play-view', () => {
@@ -606,7 +688,318 @@ bind('queue-view', () => addQueue(visible().items.map(track => track.id)));
 bind('shuffle', () => { shuffle = !shuffle; renderPlayer(); });
 bind('repeat', () => { repeat = !repeat; renderPlayer(); });
 $('search').oninput = () => { view.search = $('search').value; pageSize = 80; renderBrowse(); saveNavigation(); };
-for (const button of document.querySelectorAll('[data-pivot]')) button.onclick = () => navigate({pivot: button.dataset.pivot, detail: null});
+for (const button of document.querySelectorAll('[data-pivot]')) button.onclick = () => navigate({area: button.dataset.pivot.startsWith('video') ? 'videos' : 'music', pivot: button.dataset.pivot, detail: null});
+for (const button of document.querySelectorAll('[data-area]')) button.onclick = () => navigate({area: button.dataset.area, pivot: button.dataset.area === 'videos' ? 'videos' : 'artists', detail:null});
+async function refreshShared() {
+  if (!device || sharedRefreshing) return;
+  const credential = device;
+  sharedRefreshing = true;
+  try {
+    const next = await (await api('/api/quickplay', {
+    }, credential)).json();
+    if (device?.token !== credential.token || changingPairing) return;
+    const changed = JSON.stringify(sharedState) !== JSON.stringify(next);
+    sharedState = next;
+    await write('settings', `shared:${credential.token}`, next);
+    if (changed && (view.area === 'quickplay' || (view.area === 'podcasts' && !view.detail))) renderBrowse();
+    const opened = view.detail?.type === 'podcast' ? podcastShows.get(view.detail.id) : undefined;
+    const order = next.podcasts?.find(show=>show.id===opened?.id)?.order;
+    if (opened && order && order !== opened.order) {
+      const updated=await(await api(`/api/podcast-show/${encodeURIComponent(opened.id)}`)).json();
+      podcastShows.set(opened.id,updated);
+      reorderPodcastQueue(updated);
+      renderBrowse();
+    }
+  }
+  catch (error) {
+    if (error.status !== 404 && !sharedState) throw error;
+  }
+  finally {
+    sharedRefreshing = false;
+  }
+}
+async function resumeProgress(item) {
+  const pending = await read('pending', progressKey(item));
+  if (pending?.token === device.token) return pending;
+  if (sharedState) {
+    try {
+      const progress = await (await api(`/api/media-state/${encodeURIComponent(item.id)}`)).json();
+      sharedState.progress ||= {
+      };
+      sharedState.progress[item.id] = progress;
+      item.progress = progress;
+      return progress;
+    }
+    catch (error) {
+      if (error.status && error.status !== 404) throw error;
+    }
+  }
+  return item.progress || sharedState?.progress?.[item.id] || await read('progress', progressKey(item));
+}
+function restorePosition(media, progress) {
+  if (progress?.position > 0 && !progress.completed && (!Number.isFinite(media.duration) || progress.position < media.duration - 1)) media.currentTime = progress.position;
+}
+function disabledArea(area) {
+  $('view-actions').hidden = true;
+  $('album-pin').hidden=true;
+  $('more').hidden = true;
+  $('view-title').textContent = area;
+  $('view-subtitle').textContent = '';
+  $('browse').replaceChildren(node('p', 'empty', `To access ${area}, choose Pair phone in desktop Devices and pair again with its new Tailscale QR. Older pairings keep their original permissions.`));
+}
+function quickAlbum(section, entry, resume) {
+  const album = catalog.albums.get(entry.id);
+  if (!album) return;
+  const row = node('div', 'quick-album'), button = node('button', 'album-tile');
+  button.append(cover(album.art),node('strong','',album.title),node('small','',album.artist));
+  button.onclick = () => {
+    const ids=album.tracks.map(t=>t.id);
+    play(resume ? Math.max(0, ids.indexOf(entry.track)) : 0,ids).catch(fail);
+  };
+  row.append(button);
+  if (manifest.mode === 'library') {
+    const pinned = (sharedState?.pins || []).some(p=>p.id === entry.id);
+    const pin=node('button','row-action',pinned ? 'unpin' : 'pin');
+    pin.onclick=()=>changePin(entry.id,!pinned).catch(fail);
+    row.append(pin);
+  }
+  section.append(row);
+}
+function renderQuickplay() {
+  $('view-actions').hidden=true;
+  $('album-pin').hidden=true;
+  $('more').hidden=true;
+  $('view-title').textContent='quickplay';
+  $('view-subtitle').textContent=manifest.mode==='library'?'shared with your desktop':'limited to this shared queue';
+  const target=$('browse');
+  target.replaceChildren();
+  if (!sharedState) {
+    target.append(node('p','empty','Reconnect to your desktop to load shared Quickplay. Your saved music remains in Music.'));
+    return;
+  }
+  for (const [key,title] of [['pins','pins'],['new','new'],['history','history']]) {
+    const section = node('section', 'quick-section');
+    section.append(node('h2', '', title));
+    const tiles = node('div', 'album-grid');
+    for (const entry of sharedState[key] || []) quickAlbum(tiles, entry, key === 'history');
+    if (!(sharedState[key] || []).length) section.append(node('p', 'muted', `No shared ${title} yet.`));
+    section.append(tiles);
+    target.append(section);
+  }
+  const last = sharedState.last_podcast;
+  const show = sharedState.podcasts?.find(show => show.id === last?.show);
+  if (sharedState.includes_podcasts && show) {
+    const section = node('section', 'quick-section');
+    section.append(node('h2', '', 'latest podcast'));
+    const button = node('button', 'resume-show');
+    const copy = node('span', 'item-text');
+    copy.append(node('strong', '', show.title), node('small', '', 'Resume listening'));
+    button.append(cover(show.art), copy);
+    button.onclick = () => openPodcast(show.id, last.episode).catch(fail);
+    section.append(button);
+    target.prepend(section);
+  }
+}
+async function changePin(id,pinned) {
+  const previous=sharedState.pins;
+  sharedState.pins=pinned?[{
+    id,track:catalog.albums.get(id)?.tracks[0]?.id
+  },...previous.filter(p=>p.id!==id)]:previous.filter(p=>p.id!==id);
+  renderBrowse();
+  try {
+    await api('/api/state',{
+      method:'POST',body:JSON.stringify({
+        action:'pin',id,pinned
+      })
+    });
+    await refreshShared();
+  }
+  catch(error){
+    sharedState.pins=previous;
+    renderBrowse();
+    throw error;
+  }
+}
+async function openPodcast(id, playId) {
+  const opened = ++podcastOpenGeneration, playback = playGeneration;
+  await refreshShared();
+  if (opened !== podcastOpenGeneration || playback !== playGeneration) return;
+  if (!sharedState?.includes_podcasts) {
+    navigate({
+      area:'podcasts',detail:null
+    });
+    return;
+  }
+  const response=await (await api(`/api/podcast-show/${encodeURIComponent(id)}`)).json();
+  if (opened !== podcastOpenGeneration || playback !== playGeneration) return;
+  podcastShows.set(id,response);
+  navigate({
+    area:'podcasts',detail:{
+      type:'podcast',id
+    }
+  });
+  reorderPodcastQueue(response);
+  if(playId){
+    const episodes=response.episodes;
+    let index=episodes.findIndex(e=>e.id===playId);
+    if(playId==='latest') index=episodes.reduce((best,ep,i)=>best<0||((ep.published||0)>(episodes[best].published||0))?i:best,-1);
+    else {
+      if(index<0)index=0;
+      const first=index;
+      while(index<episodes.length&&episodes[index].progress?.completed)index++;
+      if(index===episodes.length)index=episodes.findIndex((ep,i)=>i<first&&!ep.progress?.completed);
+    }
+    if(index>=0&&index<episodes.length)await playPodcast(index,episodes.map(e=>e.id));
+    else say('No more unplayed episodes.');
+  }
+}
+function renderPodcasts() {
+  if(!sharedState?.includes_podcasts){
+    disabledArea('podcasts');
+    return;
+  }
+  const target=$('browse');
+  target.replaceChildren();
+  $('more').hidden=true;
+  $('view-actions').hidden=true;
+  $('album-pin').hidden=true;
+  $('view-title').textContent='podcasts';
+  $('view-subtitle').textContent='streams on demand · listening state shared with your desktop';
+  $('back').hidden=!view.detail;
+  if(view.detail?.type==='podcast'){
+    const show=sharedState.podcasts.find(s=>s.id===view.detail.id), detail=podcastShows.get(view.detail.id);
+    $('view-title').textContent=show?.title||'podcast';
+    if(!detail){
+      const b=node('button','item','load episodes');
+      b.onclick=()=>openPodcast(view.detail.id).catch(fail);
+      target.append(b);
+      return;
+    }
+    if (show?.summary) {
+      if (show.summary.length <= 280) target.append(node('p', 'show-summary', show.summary));
+      else {
+        const synopsis = node('details', 'show-description');
+        synopsis.append(node('summary', '', 'Show synopsis'), node('p', 'show-summary', show.summary));
+        target.append(synopsis);
+      }
+    }
+    const order=node('button','secondary',detail.order==='oldest_first'?'oldest first':'newest first');
+    order.onclick=async()=>{
+      try{
+        await api('/api/state',{
+          method:'POST',body:JSON.stringify({
+            action:'order',id:detail.id,order:detail.order==='oldest_first'?'newest_first':'oldest_first'
+          })
+        });
+        await openPodcast(detail.id);
+      }
+      catch(e){
+        fail(e);
+      }
+    };
+    target.append(order);
+    const episodes=detail.episodes.filter(e=>!view.search||e.title.toLocaleLowerCase().includes(view.search.toLocaleLowerCase()));
+    for(const ep of episodes.slice(0,pageSize)){
+      const b = node('button', 'episode-row item');
+      b.append(node('strong', '', ep.title), node('small', 'episode-summary', ep.summary || ''));
+      b.onclick=()=>playPodcast(detail.episodes.findIndex(e=>e.id===ep.id),detail.episodes.map(e=>e.id)).catch(fail);
+      target.append(b);
+    }
+    $('more').hidden=episodes.length<=pageSize;
+    return;
+  }
+  const tiles = node('div', 'album-grid');
+  for (const show of sharedState.podcasts || []) {
+    if (view.search && !`${show.title} ${show.publisher}`.toLocaleLowerCase().includes(view.search.toLocaleLowerCase())) continue;
+    const button = node('button', 'album-tile');
+    button.append(cover(show.art), node('strong', '', show.title), node('small', '', show.publisher));
+    button.onclick = () => openPodcast(show.id).catch(fail);
+    tiles.append(button);
+  }
+  target.append(tiles);
+  if(!sharedState.podcasts?.length)target.append(node('p','empty','Subscribe to podcasts on your desktop. Their shows will appear here.'));
+}
+function reorderPodcastQueue(detail) {
+  if(activePodcastShow !== detail.id) return;
+  activePodcastEpisodes=detail.episodes;
+  podcastQueue=detail.episodes.map(ep=>ep.id);
+  podcastIndex=podcastQueue.indexOf(currentPodcast?.id);
+  savePodcastQueue().catch(fail);
+}
+function savePodcastQueue() {
+  return write('settings','podcastPlayback',{
+    scope:manifest.scope,token:device.token,show:activePodcastShow,episodes:activePodcastEpisodes,index:podcastIndex
+  });
+}
+async function playPodcast(index, queue) {
+  let detail;
+  if(queue){
+    detail=[...podcastShows.values()].find(s=>s.episodes.some(ep=>ep.id===queue[index]));
+  }
+  else detail={
+    id:activePodcastShow,episodes:activePodcastEpisodes
+  };
+  const ids=queue||podcastQueue;
+  const item=detail?.episodes.find(ep=>ep.id===ids[index]);
+  if(!item)return;
+  const generation=++playGeneration;
+  mediaController?.abort();
+  await saveProgress();
+  if(generation!==playGeneration)return;
+  audio.pause();
+  video.pause();
+  // Refresh authorization and the trusted episode mapping after desktop restart.
+  const fresh=await(await api(`/api/podcast-show/${encodeURIComponent(detail.id)}`)).json();
+  if(generation!==playGeneration)return;
+  podcastShows.set(detail.id,fresh);
+  const selected=fresh.episodes.find(ep=>ep.id===item.id);
+  if(!selected)throw new Error('This episode is no longer listed in the shared feed.');
+  const session=await(await api('/api/podcast-session',{
+    method:'POST',body:JSON.stringify({
+      action:'play',id:item.id
+    })
+  })).json();
+  if(generation!==playGeneration)return;
+  const progress=await resumeProgress(selected);
+  if(generation!==playGeneration)return;
+  if(audio.src?.startsWith('blob:'))URL.revokeObjectURL(audio.src);
+  currentTrack=undefined;
+  currentVideo=undefined;
+  currentPodcast=selected;
+  selected.conflicted=false;
+  activePodcastShow=fresh.id;
+  activePodcastEpisodes=fresh.episodes;
+  podcastQueue=fresh.episodes.map(ep=>ep.id);
+  podcastIndex=podcastQueue.indexOf(selected.id);
+  progressStarted=true;
+  audio.src=session.url;
+  video.removeAttribute('src');
+  video.load();
+  audio.onloadedmetadata=()=>restorePosition(audio,progress);
+  showPlayer=true;
+  renderPlayer();
+  await savePodcastQueue();
+  if(generation!==playGeneration)return;
+  try{
+    await audio.play();
+    if(generation===playGeneration)saveProgress().then(()=>sync(false)).catch(fail);
+  }
+  catch(_){
+    if(generation===playGeneration)say('Episode ready. Tap play to listen.');
+  }
+}
+async function rewind(){
+  const media=currentMedia();
+  if(!Number.isFinite(media.currentTime)||!media.getAttribute('src'))return;
+  const paused=media.paused;
+  media.currentTime=Math.max(0,media.currentTime-10);
+  if(paused)media.pause();
+  await saveProgress();
+  await sync();
+}
+if (typeof setInterval === 'function') setInterval(()=>{
+  if (device && !document.hidden && !changingPairing) sync().catch(() => {});
+},15000);
 async function prepareOffline() {
   if (!isSecureContext || !('serviceWorker' in navigator)) {
     $('offline-status').textContent = 'Offline reopening needs trusted HTTPS and service-worker support. Online pairing and playback still work.';
@@ -646,6 +1039,10 @@ async function prepareOffline() {
     queueIndex = Math.min(stored[5].index, playQueue.length - 1);
     currentTrack = catalog.tracks.get(playQueue[queueIndex]);
   }
+  if (!view.area) view.area = view.pivot.startsWith('video') ? 'videos' : 'music';
+  sharedState = await read('settings', `shared:${device?.token}`);
+  const podcastPlayback = await read('settings','podcastPlayback');
+  if(podcastPlayback && podcastPlayback.scope===manifest?.scope && podcastPlayback.token===device?.token && podcastPlayback.episodes?.length){activePodcastShow=podcastPlayback.show;activePodcastEpisodes=podcastPlayback.episodes;podcastQueue=activePodcastEpisodes.map(e=>e.id);podcastIndex=podcastPlayback.index;}
   render(); $('pair').disabled = false; prepareOffline().catch(fail); await updateSummary();
   if (invalidLink) say('Invalid pairing link. Scan a fresh QR from desktop Devices.');
   else if (pendingPair) say('Pairing link ready.');

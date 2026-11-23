@@ -17,14 +17,14 @@ impl Ui {
         } else {
             mode
         };
-        let music = !videos && !["photos", "podcasts"].contains(&tab);
+        let podcasts = tab == "podcasts" || tab == "podcasts/browse";
+        let music = !videos && !podcasts;
         let categories = row(8);
         categories.add_css_class("collection-categories");
         panel.append(&categories);
         for (name, destination) in [
             ("MUSIC", "artists"),
             ("VIDEOS", "videos"),
-            ("PICTURES", "photos"),
             ("PODCASTS", "podcasts"),
         ] {
             let b = app_button(self, name, move |u| {
@@ -33,6 +33,7 @@ impl Ui {
             if (music && destination == "artists")
                 || (videos && destination == "videos")
                 || tab == destination
+                || (podcasts && destination == "podcasts")
             {
                 b.add_css_class("selected");
             }
@@ -96,15 +97,15 @@ impl Ui {
                 }
             });
             self.collection_music(&results, tab);
-        } else if tab == "photos" {
-            self.photos(&results);
+        } else if tab == "podcasts" {
+            self.podcast_gallery(&results);
+        } else if tab == "podcasts/browse" {
+            self.podcast_browser(&results);
         } else {
             let list = col(4);
             results.append(&scroller(&list));
-            match tab {
-                "playlists" => self.playlists(&list),
-                "podcasts" => self.podcasts(&list),
-                _ => {}
+            if tab == "playlists" {
+                self.playlists(&list);
             }
         }
     }

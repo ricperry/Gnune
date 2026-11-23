@@ -10,7 +10,7 @@ Gnune is a Cargo application using GTK4, Lofty, mpv for music, and an embedded G
 
 - Build in small, runnable increments that reproduce a coherent part of the Zune interface.
 - Use reference screenshots, recordings, or documented behavior to guide layout, typography, color, navigation, transitions, and interaction details. State assumptions where references are incomplete.
-- Follow the desktop collection at 2:00 and the listening view at 2:40 in the [Zune tutorial](https://www.youtube.com/watch?v=A1iqtznwpCA). Keep the desktop canvas available for typography, library panes and artwork. App-owned windows use content overlays for the three window buttons, which fade in together on pointer approach and support keyboard access.
+- Follow the desktop collection at 2:00 and the listening view at 2:40 in the [Zune tutorial](https://www.youtube.com/watch?v=A1iqtznwpCA). Keep the desktop canvas available for typography, library panes and artwork. App-owned windows use content overlays for the three window buttons, which stay visible on a transparent background and support keyboard access.
 - Use the author’s latest exported Gnune icon in `assets/` as the source for app icons.
 - Inspect existing code and dependencies before choosing libraries. Favor maintained Rust libraries with good Linux support and keep architectural decisions proportional to the implemented scope.
 - Target Fedora with GNOME on Wayland. Keep rendering and hardware integration compatible with AMD systems and avoid assumptions that require proprietary GPU tooling.

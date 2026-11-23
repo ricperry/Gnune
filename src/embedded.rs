@@ -19,17 +19,44 @@ impl VideoPlaylist {
     }
 }
 
+#[derive(Clone)]
+struct PodcastSequence {
+    feed: String,
+    episodes: Rc<[media::Episode]>,
+    index: usize,
+}
+impl PodcastSequence {
+    fn step(&self, delta: isize) -> Option<Self> {
+        let index = self.index.checked_add_signed(delta)?;
+        (index < self.episodes.len()).then(|| Self {
+            feed: self.feed.clone(),
+            episodes: self.episodes.clone(),
+            index,
+        })
+    }
+}
+
 pub(super) struct Media {
     pipeline: gst::Element,
     paintable: gtk::gdk::Paintable,
     pub path: PathBuf,
     pub title: String,
+    pub stream_uri: Option<String>,
+    pub show_feed: Option<String>,
+    pub podcast_id: Option<podcasts::EpisodeId>,
+    podcast_sequence: Option<PodcastSequence>,
+    requested_seek: Cell<Option<(f64, Instant)>>,
+    captured_progress: Cell<Option<podcasts::EpisodeProgress>>,
+    stream_artist: String,
+    stream_album: String,
     artwork: MediaArtwork,
     pub audio: bool,
     playlist: Option<VideoPlaylist>,
     pub return_page: Page,
     paused: Cell<bool>,
+    buffering: Cell<bool>,
     ended: Cell<bool>,
+    completion_seen: Cell<bool>,
     error: RefCell<Option<String>>,
     resume: Cell<Option<f64>>,
     rate: Cell<f64>,
@@ -44,6 +71,7 @@ impl Media {
         return_page: Page,
         volume: f64,
         resume: f64,
+        stream_uri: Option<&str>,
     ) -> Result<Self, String> {
         gst::init().map_err(|e| e.to_string())?;
         let pipeline = gst::ElementFactory::make("playbin")
@@ -63,9 +91,22 @@ impl Media {
                 .map_err(|e| e.to_string())?;
             pipeline.set_property("audio-sink", &sink);
         }
-        pipeline.set_property("uri", gio::File::for_path(path).uri().as_str());
+        if let Some(uri) = stream_uri {
+            pipeline.set_property("uri", uri);
+            // Streaming buffers stay in memory; never enable playbin's disk download mode.
+            let flags = pipeline.property_value("flags");
+            if let Some(class) = glib::FlagsClass::with_type(flags.type_())
+                && let Ok(flags) = class.unset_by_nick(flags, "download")
+            {
+                pipeline.set_property_from_value("flags", &flags);
+            }
+        } else {
+            pipeline.set_property("uri", gio::File::for_path(path).uri().as_str());
+        }
         pipeline.set_property("volume", volume.clamp(0., 100.) / 100.);
-        if let Some(subtitle) = subtitle_sidecar(path) {
+        if stream_uri.is_none()
+            && let Some(subtitle) = subtitle_sidecar(path)
+        {
             pipeline.set_property("suburi", gio::File::for_path(subtitle).uri().as_str());
         }
         pipeline
@@ -76,12 +117,22 @@ impl Media {
             paintable,
             path: path.into(),
             title,
+            stream_uri: stream_uri.map(str::to_owned),
+            show_feed: None,
+            podcast_id: None,
+            podcast_sequence: None,
+            requested_seek: Cell::new(None),
+            captured_progress: Cell::new(None),
+            stream_artist: String::new(),
+            stream_album: String::new(),
             artwork: MediaArtwork::default(),
             playlist: None,
             audio,
             return_page,
             paused: Cell::new(false),
+            buffering: Cell::new(false),
             ended: Cell::new(false),
+            completion_seen: Cell::new(false),
             error: RefCell::new(None),
             resume: Cell::new((resume > 0.).then_some(resume)),
             rate: Cell::new(1.),
@@ -91,12 +142,26 @@ impl Media {
 
     fn snapshot(&self) -> PlaybackState {
         if let Some(bus) = self.pipeline.bus() {
-            for message in bus.iter_filtered(&[gst::MessageType::Error, gst::MessageType::Eos]) {
+            for message in bus.iter_filtered(&[
+                gst::MessageType::Error,
+                gst::MessageType::Eos,
+                gst::MessageType::Buffering,
+            ]) {
                 match message.view() {
                     gst::MessageView::Error(e) => {
                         *self.error.borrow_mut() = Some(e.error().to_string());
                         self.paused.set(true);
                         let _ = self.pipeline.set_state(gst::State::Paused);
+                    }
+                    gst::MessageView::Buffering(message) if self.stream_uri.is_some() => {
+                        let buffering = message.percent() < 100;
+                        self.buffering.set(buffering);
+                        let state = if buffering || self.paused.get() {
+                            gst::State::Paused
+                        } else {
+                            gst::State::Playing
+                        };
+                        let _ = self.pipeline.set_state(state);
                     }
                     gst::MessageView::Eos(_) => {
                         self.ended.set(true);
@@ -116,6 +181,20 @@ impl Media {
         {
             self.resume.set(None);
         }
+        let queried = self
+            .pipeline
+            .query_position::<gst::ClockTime>()
+            .map_or(0., |value| value.nseconds() as f64 / 1e9);
+        let position = if let Some((target, requested)) = self.requested_seek.get() {
+            if requested.elapsed() < Duration::from_secs(2) && (queried - target).abs() > 2. {
+                target
+            } else {
+                self.requested_seek.set(None);
+                queried
+            }
+        } else {
+            queried
+        };
         PlaybackState {
             track_id: Some(self.path.to_string_lossy().into_owned()),
             queue_index: None,
@@ -123,10 +202,7 @@ impl Media {
             finished: self.ended.get(),
             loaded: duration > 0.,
             duration,
-            position: self
-                .pipeline
-                .query_position::<gst::ClockTime>()
-                .map_or(0., |v| v.nseconds() as f64 / 1e9),
+            position,
             position_updated: std::time::Instant::now(),
             volume: self.pipeline.property::<f64>("volume") * 100.,
             error: self.error.borrow().clone(),
@@ -138,7 +214,7 @@ impl Media {
             self.seek(0.)?;
         }
         self.pipeline
-            .set_state(if paused {
+            .set_state(if paused || self.buffering.get() {
                 gst::State::Paused
             } else {
                 gst::State::Playing
@@ -163,6 +239,9 @@ impl Media {
             )
             .map_err(|e| e.to_string())?;
         self.ended.set(false);
+        self.completion_seen.set(false);
+        self.requested_seek
+            .set(Some((seconds.max(0.), Instant::now())));
         Ok(())
     }
 
@@ -221,7 +300,173 @@ impl Drop for Media {
 
 impl Ui {
     pub(super) fn open_embedded(self: &Rc<Self>, path: &Path, audio: bool) {
+        let saved = self.db.borrow().podcast_downloads.get(path).cloned();
+        if let Some(id) = saved {
+            let episode = self
+                .feeds
+                .borrow()
+                .get(&id.feed_url)
+                .and_then(|episodes| {
+                    episodes
+                        .iter()
+                        .find(|episode| episode.url == id.episode_url)
+                })
+                .cloned()
+                .unwrap_or_else(|| media::Episode {
+                    title: self.video_title(path),
+                    url: id.episode_url.clone(),
+                    ..Default::default()
+                });
+            self.stream_podcast(&id.feed_url, &episode);
+            return;
+        }
         self.command(self.select_embedded(path, audio, None, true));
+    }
+
+    pub(super) fn stream_podcast(self: &Rc<Self>, feed: &str, episode: &media::Episode) {
+        self.podcast_latest_pending.borrow_mut().take();
+        self.podcast_resume_pending.borrow_mut().take();
+        let result = self.select_podcast_stream(feed, episode, None, true);
+        self.command(result);
+    }
+
+    fn select_podcast_stream(
+        self: &Rc<Self>,
+        feed: &str,
+        episode: &media::Episode,
+        start: Option<f64>,
+        reveal: bool,
+    ) -> Result<(), String> {
+        let id = podcasts::EpisodeId::new(feed, &episode.url)?;
+        let uri = id.episode_url.clone();
+        if self
+            .media
+            .borrow()
+            .as_ref()
+            .is_some_and(|media| media.podcast_id.as_ref() == Some(&id))
+        {
+            if let Some(position) = start {
+                self.seek_playback(position)?;
+            }
+            self.set_playback_paused(false)?;
+            let state = self.playback_state();
+            self.db
+                .borrow_mut()
+                .record_podcast_progress(&id, state.position, false);
+            self.persist_playback();
+            if reveal {
+                self.go(Page::PodcastNow);
+            }
+            return Ok(());
+        }
+        let show = self
+            .db
+            .borrow()
+            .podcast_shows
+            .get(feed)
+            .cloned()
+            .unwrap_or_default();
+        // This key identifies progress only. It is never handed to a file/media tool.
+        let identity = PathBuf::from(format!("podcast:{}", enrichment::key(&[&uri])));
+        let saved = self
+            .db
+            .borrow()
+            .podcast_progress
+            .get(&id.feed_url)
+            .and_then(|episodes| episodes.get(&id.episode_url))
+            .copied();
+        let resume = start.unwrap_or_else(|| {
+            saved.map_or_else(
+                || {
+                    self.db
+                        .borrow()
+                        .progress
+                        .get(&identity)
+                        .copied()
+                        .unwrap_or(0.)
+                },
+                |saved| {
+                    if saved.completed {
+                        0.
+                    } else {
+                        saved.position_secs.max(0.)
+                    }
+                },
+            )
+        });
+        let local = self
+            .db
+            .borrow()
+            .podcast_downloads
+            .iter()
+            .find(|(path, candidate)| *candidate == &id && path.is_file())
+            .map(|(path, _)| path.clone());
+        self.save_position();
+        let mut media = Media::new(
+            local.as_deref().unwrap_or(&identity),
+            episode.title.clone(),
+            true,
+            Page::Podcast(feed.into()),
+            self.db.borrow().volume.unwrap_or(80.),
+            resume,
+            local.is_none().then_some(uri.as_str()),
+        )?;
+        media.podcast_id = Some(id.clone());
+        media.captured_progress.set(Some(podcasts::EpisodeProgress {
+            position_secs: resume,
+            completed: false,
+        }));
+        let order = self
+            .db
+            .borrow()
+            .podcast_orders
+            .get(feed)
+            .copied()
+            .unwrap_or_default();
+        let mut episodes = podcasts::ordered_episodes(
+            self.feeds.borrow().get(feed).map_or(&[], Vec::as_slice),
+            order,
+        );
+        if !episodes
+            .iter()
+            .any(|candidate| candidate.url == episode.url)
+        {
+            episodes.push(episode.clone());
+        }
+        let index = episodes
+            .iter()
+            .position(|candidate| candidate.url == episode.url)
+            .unwrap_or(0);
+        media.podcast_sequence = Some(PodcastSequence {
+            feed: feed.into(),
+            episodes: episodes.into(),
+            index,
+        });
+        media.show_feed = Some(feed.into());
+        media.stream_artist = show.publisher;
+        media.stream_album = show.title;
+        media.artwork.cover = show
+            .image
+            .as_deref()
+            .map(media::podcast_cover_path)
+            .filter(|path| path.is_file());
+        self.close_embedded();
+        self.player.set_paused(true)?;
+        let started = media.set_paused(false);
+        *self.media.borrow_mut() = Some(media);
+        self.db
+            .borrow_mut()
+            .record_podcast_progress(&id, resume, false);
+        self.persist_playback();
+        self.next.set_sensitive(self.has_next_video());
+        self.notice("");
+        self.update_cover();
+        if reveal {
+            self.go(Page::PodcastNow);
+        } else if *self.page.borrow() == Page::PodcastNow {
+            self.render();
+        }
+        started
     }
 
     pub(super) fn play_video_playlist(self: &Rc<Self>, items: Rc<[PathBuf]>, index: usize) {
@@ -249,6 +494,7 @@ impl Ui {
         playlist: Option<VideoPlaylist>,
         reveal: bool,
     ) -> Result<(), String> {
+        self.podcast_latest_pending.borrow_mut().take();
         // Reopening the visible item retains its running pipeline and playhead.
         if reveal
             && self
@@ -280,7 +526,15 @@ impl Ui {
         };
         let volume = self.db.borrow().volume.unwrap_or(80.);
         let resume = self.db.borrow().progress.get(path).copied().unwrap_or(0.);
-        let mut media = Media::new(path, self.video_title(path), audio, prior, volume, resume)?;
+        let mut media = Media::new(
+            path,
+            self.video_title(path),
+            audio,
+            prior,
+            volume,
+            resume,
+            None,
+        )?;
         media.artwork = self.embedded_artwork(path);
         media.playlist = playlist;
         self.close_embedded();
@@ -300,19 +554,125 @@ impl Ui {
     }
 
     pub(super) fn has_next_video(&self) -> bool {
-        self.media
-            .borrow()
-            .as_ref()
-            .and_then(|m| m.playlist.as_ref())
-            .is_some_and(|p| p.index + 1 < p.items.len())
+        self.media.borrow().as_ref().is_some_and(|media| {
+            media
+                .podcast_sequence
+                .as_ref()
+                .is_some_and(|sequence| sequence.index + 1 < sequence.episodes.len())
+                || media
+                    .playlist
+                    .as_ref()
+                    .is_some_and(|sequence| sequence.index + 1 < sequence.items.len())
+        })
     }
-
+    fn adjacent_podcast(&self, delta: isize, skip_completed: bool) -> Option<PodcastSequence> {
+        let mut sequence = self.media.borrow().as_ref()?.podcast_sequence.clone()?;
+        loop {
+            sequence = sequence.step(delta)?;
+            if !skip_completed
+                || !self
+                    .db
+                    .borrow()
+                    .podcast_progress
+                    .get(&sequence.feed)
+                    .and_then(|progress| progress.get(&sequence.episodes[sequence.index].url))
+                    .is_some_and(|saved| saved.completed)
+            {
+                return Some(sequence);
+            }
+        }
+    }
+    fn play_podcast_sequence(self: &Rc<Self>, sequence: PodcastSequence) -> Result<(), String> {
+        self.select_podcast_stream(
+            &sequence.feed,
+            &sequence.episodes[sequence.index],
+            Some(0.),
+            false,
+        )
+    }
+    pub(super) fn reorder_playing_podcast(&self, feed: &str) {
+        let order = self
+            .db
+            .borrow()
+            .podcast_orders
+            .get(feed)
+            .copied()
+            .unwrap_or_default();
+        let episodes = podcasts::ordered_episodes(
+            self.feeds.borrow().get(feed).map_or(&[], Vec::as_slice),
+            order,
+        );
+        if let Some(media) = self.media.borrow_mut().as_mut()
+            && media.show_feed.as_deref() == Some(feed)
+            && let Some(id) = &media.podcast_id
+            && let Some(index) = episodes
+                .iter()
+                .position(|episode| episode.url == id.episode_url)
+        {
+            media.podcast_sequence = Some(PodcastSequence {
+                feed: feed.into(),
+                episodes: episodes.into(),
+                index,
+            });
+        }
+        self.next.set_sensitive(self.has_next_video());
+    }
+    pub(super) fn capture_podcast_progress(&self, state: &PlaybackState, position: Option<f64>) {
+        let media = self.media.borrow();
+        if let Some(media) = media.as_ref()
+            && let Some(id) = &media.podcast_id
+            && media.resume.get().is_none()
+            && let Some(saved) = podcasts::progress_update(
+                media.captured_progress.get(),
+                position.unwrap_or(state.position),
+                state.finished,
+                state.paused,
+                position.is_some(),
+            )
+        {
+            self.db
+                .borrow_mut()
+                .record_podcast_progress(id, saved.position_secs, saved.completed);
+            media.captured_progress.set(Some(saved));
+            self.podcast_progress_dirty.set(true);
+        }
+    }
+    pub(super) fn resume_podcast_episode(
+        self: &Rc<Self>,
+        feed: &str,
+        episode: &media::Episode,
+        position: f64,
+    ) {
+        self.command(self.select_podcast_stream(feed, episode, Some(position), true));
+    }
+    pub(super) fn force_latest_podcast(self: &Rc<Self>, feed: &str, episode: &media::Episode) {
+        self.podcast_latest_pending.borrow_mut().take();
+        self.podcast_resume_pending.borrow_mut().take();
+        self.command(self.select_podcast_stream(feed, episode, Some(0.), true));
+    }
     fn adjacent_video(&self, delta: isize) -> Option<VideoPlaylist> {
         self.media.borrow().as_ref()?.playlist.as_ref()?.step(delta)
     }
 
     // Handle an EOS once, including when opening its successor fails.
     pub(super) fn advance_finished_video(self: &Rc<Self>) -> bool {
+        let podcast = self.media.borrow().as_ref().and_then(|media| {
+            media
+                .show_feed
+                .clone()
+                .map(|feed| (feed, media.completion_seen.replace(true)))
+        });
+        if let Some((_, true)) = podcast {
+            return false;
+        }
+        if let Some(next) = self.adjacent_podcast(1, true) {
+            self.command(self.play_podcast_sequence(next));
+            return true;
+        }
+        if let Some((feed, _)) = podcast {
+            self.refresh_podcast_views(&feed);
+            return false;
+        }
         let Some(next) = self.adjacent_video(1) else {
             return false;
         };
@@ -331,6 +691,22 @@ impl Ui {
         let media = self.media.borrow_mut().take();
         if let Some(media) = media {
             let state = media.snapshot();
+            if let Some(id) = &media.podcast_id
+                && media.resume.get().is_none()
+                && let Some(saved) = podcasts::progress_update(
+                    media.captured_progress.get(),
+                    state.position,
+                    state.finished,
+                    state.paused,
+                    false,
+                )
+            {
+                self.db.borrow_mut().record_podcast_progress(
+                    id,
+                    saved.position_secs,
+                    saved.completed,
+                );
+            }
             self.db.borrow_mut().progress.insert(
                 media.path.clone(),
                 if state.finished { 0. } else { state.position },
@@ -456,7 +832,18 @@ impl Ui {
 
     pub(super) fn refresh_embedded_artwork(&self) {
         if let Some(media) = self.media.borrow_mut().as_mut() {
-            media.artwork = self.embedded_artwork(&media.path);
+            if let Some(feed) = &media.show_feed {
+                media.artwork.cover = self
+                    .db
+                    .borrow()
+                    .podcast_shows
+                    .get(feed)
+                    .and_then(|show| show.image.as_deref())
+                    .map(media::podcast_cover_path)
+                    .filter(|path| path.is_file());
+            } else {
+                media.artwork = self.embedded_artwork(&media.path);
+            }
         }
     }
 
@@ -545,10 +932,11 @@ impl Ui {
         if let Some((prior, path)) = prior {
             // An explicit stop releases the video sink and leaves music paused.
             self.close_embedded();
+            self.notice("");
             self.db.borrow_mut().progress.insert(path, 0.);
             self.persist();
             self.player.set_paused(true)?;
-            if *self.page.borrow() == Page::Video {
+            if matches!(*self.page.borrow(), Page::Video | Page::PodcastNow) {
                 self.go(prior);
             } else {
                 self.render();
@@ -575,6 +963,10 @@ impl Ui {
             .borrow_mut()
             .pause(paused, glib::monotonic_time());
         self.draw_playhead(glib::monotonic_time());
+        let state = self.playback_state();
+        self.capture_podcast_progress(&state, Some(state.position));
+        self.podcast_progress_dirty.set(false);
+        self.persist_playback();
         Ok(())
     }
     pub(super) fn seek_playback(&self, seconds: f64) -> Result<(), String> {
@@ -586,6 +978,8 @@ impl Ui {
             .borrow_mut()
             .seek(seconds, glib::monotonic_time());
         self.draw_playhead(glib::monotonic_time());
+        self.capture_podcast_progress(&self.playback_state(), Some(seconds.max(0.)));
+        self.persist_playback();
         Ok(())
     }
     pub(super) fn set_playback_volume(&self, volume: f64) -> Result<(), String> {
@@ -597,6 +991,9 @@ impl Ui {
         self.player.set_volume(volume)
     }
     pub(super) fn next_playback(self: &Rc<Self>) -> Result<(), String> {
+        if let Some(next) = self.adjacent_podcast(1, false) {
+            return self.play_podcast_sequence(next);
+        }
         if let Some(next) = self.adjacent_video(1) {
             self.select_playlist_item(next, false)
         } else if self.media.borrow().is_some() {
@@ -606,6 +1003,9 @@ impl Ui {
         }
     }
     pub(super) fn previous_playback(self: &Rc<Self>) -> Result<(), String> {
+        if let Some(previous) = self.adjacent_podcast(-1, false) {
+            return self.play_podcast_sequence(previous);
+        }
         if let Some(previous) = self.adjacent_video(-1) {
             self.select_playlist_item(previous, false)
         } else if self.media.borrow().is_some() {
@@ -644,21 +1044,27 @@ impl Ui {
             id: m.path.to_string_lossy().into_owned(),
             path: m.path.clone(),
             title: m.title.clone(),
-            artist: self
-                .db
-                .borrow()
-                .video_tags
-                .get(&m.path)
-                .map(|v| v.song().artist.clone())
-                .filter(|v| !v.is_empty())
-                .unwrap_or_else(|| if m.audio { "Podcast" } else { "Video" }.into()),
-            album: self
-                .db
-                .borrow()
-                .video_tags
-                .get(&m.path)
-                .map(|v| v.song().album.clone())
-                .unwrap_or_default(),
+            artist: if m.show_feed.is_some() {
+                m.stream_artist.clone()
+            } else {
+                self.db
+                    .borrow()
+                    .video_tags
+                    .get(&m.path)
+                    .map(|v| v.song().artist.clone())
+                    .filter(|v| !v.is_empty())
+                    .unwrap_or_else(|| if m.audio { "Podcast" } else { "Video" }.into())
+            },
+            album: if m.show_feed.is_some() {
+                m.stream_album.clone()
+            } else {
+                self.db
+                    .borrow()
+                    .video_tags
+                    .get(&m.path)
+                    .map(|v| v.song().album.clone())
+                    .unwrap_or_default()
+            },
             duration: m.snapshot().duration,
             cover: m.artwork.cover.clone(),
             ..Track::default()

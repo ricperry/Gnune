@@ -1,39 +1,9 @@
 //! Content-only window chrome shared by every application-owned GTK window.
 use gtk::{gdk, glib, prelude::*};
-use std::{cell::Cell, cell::RefCell, rc::Rc};
+use std::cell::RefCell;
 
 const INSET: i32 = 8;
 const EDGE: f64 = 6.;
-
-struct Controls {
-    revealer: glib::WeakRef<gtk::Revealer>,
-    buttons: Vec<glib::WeakRef<gtk::Button>>,
-    proximity: Cell<f64>,
-    focused: Cell<bool>,
-    previous_focus: RefCell<Option<glib::WeakRef<gtk::Widget>>>,
-}
-
-impl Controls {
-    fn update(&self) {
-        let opacity = if self.focused.get() {
-            1.
-        } else {
-            self.proximity.get()
-        };
-        let show = opacity > 0.;
-        if let Some(revealer) = self.revealer.upgrade() {
-            if show && let Some(group) = revealer.child() {
-                group.set_opacity(opacity);
-            }
-            // Stop targeting immediately on fade-out, even while still drawn.
-            revealer.set_can_target(show);
-            for button in self.buttons.iter().filter_map(glib::WeakRef::upgrade) {
-                button.set_focusable(show);
-            }
-            revealer.set_reveal_child(show);
-        }
-    }
-}
 
 pub fn set_content(window: &impl IsA<gtk::Window>, content: &impl IsA<gtk::Widget>) {
     let window = window.as_ref();
@@ -56,12 +26,10 @@ pub fn set_content(window: &impl IsA<gtk::Window>, content: &impl IsA<gtk::Widge
         let button = gtk::Button::from_icon_name(icon);
         button.set_tooltip_text(Some(label));
         button.update_property(&[gtk::accessible::Property::Label(label)]);
-        button.set_focusable(false);
         button.set_focus_on_click(false);
         group.append(&button);
         buttons.push(button);
     }
-    buttons[2].add_css_class("close");
     let weak = window.downgrade();
     buttons[0].connect_clicked(move |_| {
         if let Some(window) = weak.upgrade() {
@@ -106,55 +74,26 @@ pub fn set_content(window: &impl IsA<gtk::Window>, content: &impl IsA<gtk::Widge
     window.connect_fullscreened_notify(update_maximize.clone());
     window.connect_resizable_notify(update_maximize);
 
-    let revealer = gtk::Revealer::builder()
-        .transition_type(gtk::RevealerTransitionType::Crossfade)
-        .transition_duration(160)
-        .halign(gtk::Align::End)
-        .valign(gtk::Align::Start)
-        .margin_top(INSET)
-        .margin_end(INSET)
-        .can_target(false)
-        .child(&group)
-        .build();
-    // GtkRevealer observes gtk-enable-animations, including reduced motion.
-    overlay.add_overlay(&revealer);
-    overlay.set_measure_overlay(&revealer, false);
-    let controls = Rc::new(Controls {
-        revealer: revealer.downgrade(),
-        buttons: buttons.iter().map(ObjectExt::downgrade).collect(),
-        proximity: Cell::new(0.),
-        focused: Cell::new(false),
-        previous_focus: RefCell::new(None),
-    });
-    let focus = gtk::EventControllerFocus::new();
-    let state = controls.clone();
-    focus.connect_contains_focus_notify(move |focus| {
-        state.focused.set(focus.contains_focus());
-        state.update();
-    });
-    group.add_controller(focus);
+    group.set_halign(gtk::Align::End);
+    group.set_valign(gtk::Align::Start);
+    group.set_margin_top(INSET);
+    group.set_margin_end(INSET);
+    overlay.add_overlay(&group);
+    overlay.set_measure_overlay(&group, false);
 
     let motion = gtk::EventControllerMotion::new();
     motion.set_propagation_phase(gtk::PropagationPhase::Capture);
-    let state = controls.clone();
     let weak = window.downgrade();
     let update_pointer = move |_: &gtk::EventControllerMotion, x, y| {
         if let Some(window) = weak.upgrade() {
-            state
-                .proximity
-                .set(control_opacity(window.width() as f64, x, y));
-            state.update();
             let edge = resize_edge(&window, x, y);
             window.set_cursor_from_name(edge.map(|(_, cursor)| cursor));
         }
     };
     motion.connect_enter(update_pointer.clone());
     motion.connect_motion(update_pointer);
-    let state = controls.clone();
     let weak = window.downgrade();
     motion.connect_leave(move |_| {
-        state.proximity.set(0.);
-        state.update();
         if let Some(window) = weak.upgrade() {
             window.set_cursor_from_name(None);
         }
@@ -163,34 +102,33 @@ pub fn set_content(window: &impl IsA<gtk::Window>, content: &impl IsA<gtk::Widge
 
     let keys = gtk::EventControllerKey::new();
     keys.set_propagation_phase(gtk::PropagationPhase::Capture);
-    let state = controls;
+    let group = group.downgrade();
+    let first = buttons[0].downgrade();
+    let previous_focus = RefCell::new(None::<glib::WeakRef<gtk::Widget>>);
     let weak = window.downgrade();
     keys.connect_key_pressed(move |_, key, _, mods| {
         let Some(window) = weak.upgrade() else {
             return glib::Propagation::Proceed;
         };
-        if key == gdk::Key::F10 && mods.is_empty() {
-            if !state.focused.get() {
-                *state.previous_focus.borrow_mut() =
-                    gtk::prelude::GtkWindowExt::focus(&window).map(|w| w.downgrade());
-                state.focused.set(true);
-                state.update();
-                if let Some(button) = state.buttons[0].upgrade() {
+        if key == gdk::Key::F10 || key == gdk::Key::Escape {
+            let focus = gtk::prelude::GtkWindowExt::focus(&window);
+            let in_controls = group.upgrade().is_some_and(|group| {
+                focus
+                    .as_ref()
+                    .is_some_and(|widget| widget.is_ancestor(&group))
+            });
+            if key == gdk::Key::F10 && mods.is_empty() {
+                if !in_controls && let Some(button) = first.upgrade() {
+                    previous_focus.replace(focus.map(|widget| widget.downgrade()));
                     button.grab_focus();
                 }
+                return glib::Propagation::Stop;
             }
-            return glib::Propagation::Stop;
-        }
-        if key == gdk::Key::Escape && state.focused.get() {
-            let previous = state
-                .previous_focus
-                .borrow_mut()
-                .take()
-                .and_then(|w| w.upgrade());
-            gtk::prelude::GtkWindowExt::set_focus(&window, previous.as_ref());
-            state.focused.set(false);
-            state.update();
-            return glib::Propagation::Stop;
+            if key == gdk::Key::Escape && in_controls {
+                let previous = previous_focus.take().and_then(|widget| widget.upgrade());
+                gtk::prelude::GtkWindowExt::set_focus(&window, previous.as_ref());
+                return glib::Propagation::Stop;
+            }
         }
         if key == gdk::Key::Escape && window.is_fullscreen() {
             window.unfullscreen();
@@ -221,14 +159,6 @@ pub fn set_content(window: &impl IsA<gtk::Window>, content: &impl IsA<gtk::Widge
     });
     window.add_controller(resize);
     window.set_child(Some(&overlay));
-}
-
-fn control_opacity(width: f64, x: f64, y: f64) -> f64 {
-    // Distance from the top-right control group. Inside the group every icon
-    // is fully legible. In the surrounding 44px the three fade together.
-    let dx = (width - 104. - x).max(0.);
-    let dy = (y - 40.).max(0.);
-    (1. - dx.hypot(dy) / 44.).clamp(0., 1.)
 }
 
 fn resize_edge(window: &gtk::Window, x: f64, y: f64) -> Option<(gdk::SurfaceEdge, &'static str)> {
@@ -278,15 +208,5 @@ mod tests {
         }
         assert!(edge_at(800., 600., 8., 8.).is_none());
         assert!(edge_at(800., 600., 400., 300.).is_none());
-    }
-
-    #[test]
-    fn proximity_tracks_window_size_including_mini_player() {
-        assert_eq!(control_opacity(1100., 1090., 40.), 1.);
-        assert_eq!(control_opacity(1100., 700., 40.), 0.);
-        assert_eq!(control_opacity(1100., 1090., 120.), 0.);
-        assert_eq!(control_opacity(680., 670., 40.), 1.);
-        assert_eq!(control_opacity(680., 300., 40.), 0.);
-        assert_eq!(control_opacity(1100., 974., 30.), 0.5);
     }
 }

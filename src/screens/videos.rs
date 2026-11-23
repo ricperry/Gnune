@@ -419,6 +419,45 @@ impl Ui {
         video: &Video,
         playlist: Option<(Rc<[PathBuf]>, usize)>,
     ) -> gtk::Box {
+        self.video_card_at(video, playlist, 188)
+    }
+
+    pub(super) fn quickplay_video_shelf(self: &Rc<Self>, root: &gtk::Box, width: i32) -> bool {
+        let mut paths: Vec<_> = self
+            .db
+            .borrow()
+            .assets
+            .iter()
+            .filter(|path| !media::is_photo_path(path))
+            .cloned()
+            .collect();
+        paths.sort_by_cached_key(|path| self.video_title(path).to_lowercase());
+        if paths.is_empty() {
+            return false;
+        }
+        let tiles = gtk::FlowBox::builder()
+            .selection_mode(gtk::SelectionMode::None)
+            .min_children_per_line(1)
+            .max_children_per_line(10)
+            .column_spacing(16)
+            .row_spacing(16)
+            .build();
+        for path in paths.into_iter().take(8) {
+            let tile = self.video_card_at(&Video::read(self, &path), None, width);
+            tile.set_width_request(width + 8);
+            tiles.insert(&tile, -1);
+        }
+        root.append(&tiles);
+        true
+    }
+
+    fn video_card_at(
+        self: &Rc<Self>,
+        video: &Video,
+        playlist: Option<(Rc<[PathBuf]>, usize)>,
+        width: i32,
+    ) -> gtk::Box {
+        let height = width * 9 / 16;
         let tile = col(3);
         tile.add_css_class("video-tile");
         tile.set_halign(gtk::Align::Start);
@@ -440,8 +479,8 @@ impl Ui {
             video.title
         ))]);
         let aspect = gtk::AspectFrame::new(0., 0.5, 16. / 9., false);
-        aspect.set_size_request(188, 106);
-        let poster = self.video_poster(&video.path, 188, 106);
+        aspect.set_size_request(width, height);
+        let poster = self.video_poster(&video.path, width, height);
         if video.duration >= 1. {
             let duration = label(&time(video.duration), "video-duration");
             duration.set_halign(gtk::Align::End);

@@ -4,6 +4,7 @@ fn main() {
     let manifest = "assets/gnune.gresource.xml";
     println!("cargo:rerun-if-changed={manifest}");
     println!("cargo:rerun-if-changed=assets/gnuneIconDraft2.png");
+    println!("cargo:rerun-if-changed=assets/icons/gnune-rewind-10-symbolic.svg");
     let output = PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("gnune.gresource");
     let status = Command::new("glib-compile-resources")
         .args([manifest, "--sourcedir=assets", "--target"])

@@ -11,110 +11,193 @@ impl Ui {
                 recent_albums(&lookup, &db.history, 4),
             )
         };
+        let (tier, large, _) = self.quickplay_dimensions();
+        self.quickplay_tier.set(tier);
         let page = col(32);
         page.add_css_class("quickplay-page");
         page.set_valign(gtk::Align::Start);
-        let sections = row(30);
+        let sections = gtk::FlowBox::builder()
+            .selection_mode(gtk::SelectionMode::None)
+            .min_children_per_line(1)
+            .max_children_per_line(5)
+            .column_spacing(32)
+            .row_spacing(28)
+            .build();
         sections.add_css_class("quickplay-sections");
         sections.set_valign(gtk::Align::Start);
         page.append(&sections);
-        let pinned = section("pins", "quickplay-pins", 170);
-        sections.append(&pinned);
+        let pinned = section("pins", "quickplay-pins", large * 2 + 8);
+        sections.insert(&pinned, -1);
         if pins.is_empty() {
             pinned.append(&quick_text("Right-click a sleeve to pin its album."));
         } else {
             self.quickplay_mosaic(&pinned, &pins, TileAction::Album);
         }
 
-        let welcome = section("welcome", "quickplay-welcome", 190);
-        sections.append(&welcome);
-        welcome.append(&quick_text(
-            "Play an album here, or browse your local collection.",
-        ));
-        let browse = app_button(self, "", |u| u.go(Page::Collection("artists".into())));
-        browse.add_css_class("quickplay-collection-link");
-        let content = col(6);
-        let image = gtk::Image::from_icon_name("folder-music-symbolic");
-        image.set_pixel_size(40);
-        image.set_halign(gtk::Align::Start);
-        content.append(&image);
-        content.append(&label("GO TO YOUR\nCOLLECTION", "quickplay-action-label"));
-        browse.set_child(Some(&content));
-        browse.set_tooltip_text(Some("Browse your local music collection"));
-        browse.update_property(&[gtk::accessible::Property::Label("Go to your collection")]);
-        welcome.append(&browse);
-        let add = app_button(self, "ADD MUSIC", |u| u.choose(true));
-        add.add_css_class("quickplay-add");
-        add.set_halign(gtk::Align::Start);
-        welcome.append(&add);
-
-        let new = section("new", "quickplay-new", 248);
-        sections.append(&new);
+        let categories = section("collection", "quickplay-welcome", large.max(180));
+        for (name, destination, icon_name) in [
+            ("MUSIC", "artists", "folder-music-symbolic"),
+            ("VIDEOS", "videos", "video-x-generic-symbolic"),
+            ("PODCASTS", "podcasts", "audio-x-generic-symbolic"),
+        ] {
+            let category = app_button(self, "", move |ui| {
+                ui.go(Page::Collection(destination.into()))
+            });
+            category.add_css_class("quickplay-category");
+            let line = row(10);
+            let image = gtk::Image::from_icon_name(icon_name);
+            image.set_pixel_size(28);
+            line.append(&image);
+            line.append(&label(name, "quickplay-action-label"));
+            category.set_child(Some(&line));
+            categories.append(&category);
+        }
+        categories.append(&app_button(self, "ADD MUSIC", |ui| ui.choose(true)));
+        sections.insert(&categories, -1);
+        let podcast = section("latest podcast", "quickplay-podcast", large.max(180));
+        self.quickplay_podcast(&podcast, large.max(164));
+        sections.insert(&podcast, -1);
+        let new = section("new", "quickplay-new", large * 2 + 8);
+        sections.insert(&new, -1);
         if added.is_empty() {
             new.append(&quick_text("Newly added albums appear here."));
         } else {
             self.quickplay_mosaic(&new, &added, TileAction::New);
         }
-        let recent = section("history", "quickplay-history", 150);
-        sections.append(&recent);
+        let recent = section("history", "quickplay-history", large * 2 + 8);
+        sections.insert(&recent, -1);
         if history.is_empty() {
             recent.append(&quick_text("Play some music to start your history."));
         } else {
             self.quickplay_mosaic(&recent, &history, TileAction::History);
         }
 
-        let seeds = smart_dj_seeds(self.db.borrow().tracks.as_slice(), &history, &added);
-        if !seeds.is_empty() {
-            let dj = row(12);
-            dj.add_css_class("quickplay-smart-dj");
-            dj.set_margin_start(200);
+        let dj = gtk::FlowBox::builder()
+            .selection_mode(gtk::SelectionMode::None)
+            .min_children_per_line(1)
+            .max_children_per_line(6)
+            .column_spacing(8)
+            .row_spacing(8)
+            .build();
+        dj.add_css_class("quickplay-smart-dj");
+        dj.set_margin_start(26);
+        dj.set_margin_end(26);
+        if self.smart_dj_controls(&dj, &history, &added) {
             page.append(&dj);
-            for track in seeds {
-                let name = track.artist.clone();
-                let b = app_button(self, "", move |u| u.mix(&track));
-                b.add_css_class("quickplay-dj-seed");
-                // The seed is an actual local artist; Smart DJ uses the existing matcher.
-                let names = col(2);
-                let artist = label(&name, "quickplay-dj-artist");
-                artist.set_max_width_chars(14);
-                artist.set_ellipsize(gtk::pango::EllipsizeMode::End);
-                names.append(&artist);
-                b.set_tooltip_text(Some(&format!("Start Smart DJ from {name}")));
-                names.append(&label("smart dj", "quickplay-dj-label"));
-                b.set_child(Some(&names));
-                dj.append(&b);
-            }
+        }
+        let show_shelf = col(10);
+        show_shelf.set_margin_start(26);
+        show_shelf.set_margin_end(26);
+        show_shelf.append(&label("your podcasts", "quickplay-section-title"));
+        if self.quickplay_podcast_shelf(&show_shelf, large.clamp(148, 260)) {
+            page.append(&show_shelf);
+        }
+        let video_shelf = col(10);
+        video_shelf.set_margin_start(26);
+        video_shelf.set_margin_end(26);
+        video_shelf.append(&label("videos", "quickplay-section-title"));
+        if self.quickplay_video_shelf(&video_shelf, (large * 3 / 2).clamp(188, 340)) {
+            page.append(&video_shelf);
         }
         let scroll = gtk::ScrolledWindow::new();
-        scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
+        scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
         scroll.set_vexpand(true);
         scroll.set_child(Some(&page));
         self.body.append(&scroll);
     }
 
+    fn smart_dj_controls(
+        self: &Rc<Self>,
+        dj: &gtk::FlowBox,
+        history: &[Track],
+        added: &[Track],
+    ) -> bool {
+        let (seeds, more) = smart_dj_seeds(
+            &self.db.borrow().tracks,
+            history,
+            added,
+            &mut self.smart_dj_rotation.borrow_mut(),
+        );
+        while let Some(child) = dj.first_child() {
+            dj.remove(&child);
+        }
+        let has_artists = !seeds.is_empty();
+        for track in seeds {
+            let name = track.artist.clone();
+            let b = app_button(self, "", move |ui| ui.mix(&track));
+            b.add_css_class("quickplay-dj-seed");
+            let names = col(2);
+            let artist = label(&name, "quickplay-dj-artist");
+            artist.set_max_width_chars(14);
+            artist.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            names.append(&artist);
+            names.append(&label("smart dj", "quickplay-dj-label"));
+            b.set_tooltip_text(Some(&format!("Start Smart DJ from {name}")));
+            b.set_child(Some(&names));
+            dj.insert(&b, -1);
+        }
+        if more {
+            let row = dj.downgrade();
+            let history = history.to_vec();
+            let added = added.to_vec();
+            let more = app_button(self, "More artists", move |ui| {
+                ui.smart_dj_rotation.borrow_mut().request_next();
+                if let Some(row) = row.upgrade() {
+                    ui.smart_dj_controls(&row, &history, &added);
+                }
+            });
+            more.set_tooltip_text(Some("Show another group of Smart DJ artists"));
+            more.add_css_class("quickplay-dj-seed");
+            dj.insert(&more, -1);
+        }
+        has_artists
+    }
+
+    pub(crate) fn quickplay_dimensions(&self) -> (u8, i32, i32) {
+        let width = self.win.width().max(700);
+        let tier = ((width - 1000).max(0) / 240).min(20) as u8;
+        let large = if width < 1280 {
+            120
+        } else {
+            (width / 10).clamp(140, 360)
+        };
+        (tier, large, (large - 4) / 2)
+    }
+
     fn quickplay_mosaic(self: &Rc<Self>, section: &gtk::Box, tracks: &[Track], action: TileAction) {
+        let (_, large, small) = self.quickplay_dimensions();
         let grid = gtk::Grid::new();
         grid.add_css_class("quickplay-mosaic");
         grid.set_column_spacing(4);
         grid.set_row_spacing(4);
+        grid.set_row_homogeneous(true);
+        grid.set_column_homogeneous(true);
         grid.set_halign(gtk::Align::Start);
         section.append(&grid);
         for (index, track) in tracks.iter().enumerate() {
             let (x, y, span, size) = if index == 0 {
-                (0, 0, 2, 120)
+                (0, 0, 2, large)
             } else {
                 let position = index as i32 - 1;
                 if action == TileAction::New {
-                    (2 + position % 2, position / 2, 1, 58)
+                    (2 + position % 2, position / 2, 1, small)
                 } else {
-                    (position % 2, 2 + position / 2, 1, 58)
+                    (position % 2, 2 + position / 2, 1, small)
                 }
             };
             let tile = gtk::Button::new();
             tile.add_css_class("quickplay-tile");
             tile.set_halign(gtk::Align::Start);
             tile.set_valign(gtk::Align::Start);
-            let cover = visual::picture(self.cover(track).as_deref(), size);
+            // Paintable pixels are device-sized. Do not let their intrinsic
+            // resolution stretch logical mosaic cells on a scaled display.
+            let cover = gtk::Overlay::new();
+            cover.set_child(Some(&visual::picture(None, size)));
+            if let Some(path) = self.cover(track) {
+                let image = visual::picture(Some(&path), size);
+                cover.add_overlay(&image);
+                cover.set_measure_overlay(&image, false);
+            }
             tile.set_child(Some(&cover));
             tile.set_tooltip_text(Some(&format!(
                 "{} — {}\n{}\nRight-click for album actions",
@@ -294,21 +377,161 @@ fn set_album_pin(db: &mut Library, track: &Track, pinned: bool) {
     }
 }
 
-fn smart_dj_seeds(tracks: &[Track], history: &[Track], added: &[Track]) -> Vec<Track> {
-    let mut artists = BTreeSet::new();
-    history
-        .iter()
-        .chain(added)
-        .chain(tracks)
-        .filter(|t| artists.insert(t.artist.clone()))
-        .take(4)
-        .cloned()
-        .collect()
+#[derive(Default)]
+pub(crate) struct SmartDjRotation {
+    artists: Vec<String>,
+    remaining: Vec<String>,
+    current: Vec<String>,
+    advance: bool,
+}
+impl SmartDjRotation {
+    pub(crate) fn request_next(&mut self) {
+        self.advance = true;
+    }
+
+    fn choose(&mut self, artists: Vec<String>, rng: &mut impl rand::Rng) -> &[String] {
+        if self.artists != artists {
+            self.current.retain(|artist| artists.contains(artist));
+            self.remaining = artists
+                .iter()
+                .filter(|artist| !self.current.contains(artist))
+                .cloned()
+                .collect();
+            self.remaining.shuffle(rng);
+            self.artists = artists;
+        }
+        if self.artists.len() <= 4 {
+            self.current = self.artists.clone();
+            self.remaining.clear();
+        } else if self.advance || self.current.len() != 4 {
+            let mut group = Vec::with_capacity(4);
+            let mut deferred = Vec::new();
+            while group.len() < 4 {
+                if self.remaining.is_empty() {
+                    self.remaining = self.artists.clone();
+                    self.remaining.shuffle(rng);
+                }
+                let artist = self.remaining.pop().unwrap();
+                if group.contains(&artist) {
+                    deferred.push(artist);
+                } else {
+                    group.push(artist);
+                }
+            }
+            // Artists already shown at the tail of the old pass still belong
+            // to the new pass, but cannot appear twice in this group.
+            self.remaining.extend(deferred);
+            self.current = group;
+        }
+        self.advance = false;
+        &self.current
+    }
+}
+
+fn smart_dj_seeds(
+    tracks: &[Track],
+    history: &[Track],
+    added: &[Track],
+    rotation: &mut SmartDjRotation,
+) -> (Vec<Track>, bool) {
+    let mut artists = std::collections::BTreeMap::new();
+    for track in history.iter().chain(added).chain(tracks) {
+        if !track.artist.trim().is_empty() {
+            artists.entry(track.artist.clone()).or_insert(track);
+        }
+    }
+    let more = artists.len() > 4;
+    let selection = rotation.choose(artists.keys().cloned().collect(), &mut rand::rng());
+    (
+        selection
+            .iter()
+            .filter_map(|artist| artists.get(artist).map(|track| (*track).clone()))
+            .collect(),
+        more,
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::{SeedableRng, rngs::StdRng};
+
+    #[test]
+    fn smart_dj_visits_each_artist_before_repeating_and_never_duplicates_a_group() {
+        for count in 5..=13 {
+            let artists: Vec<_> = (0..count).map(|i| format!("Artist {i:02}")).collect();
+            let mut rotation = SmartDjRotation::default();
+            let mut rng = StdRng::seed_from_u64(count as u64);
+            let mut visited = BTreeSet::new();
+            for _ in 0..count * 4 {
+                rotation.request_next();
+                let group = rotation.choose(artists.clone(), &mut rng).to_vec();
+                assert_eq!(group.len(), 4);
+                assert_eq!(group.iter().collect::<BTreeSet<_>>().len(), 4);
+                for artist in &group {
+                    if visited.len() == count {
+                        visited.clear();
+                    }
+                    assert!(
+                        visited.insert(artist.clone()),
+                        "repeat before visiting pool"
+                    );
+                }
+                // Incidental redraws must not consume the bag or change the group.
+                let remaining = rotation.remaining.clone();
+                assert_eq!(rotation.choose(artists.clone(), &mut rng), group);
+                assert_eq!(rotation.remaining, remaining);
+            }
+        }
+    }
+
+    #[test]
+    fn smart_dj_small_pools_remain_complete_and_stable() {
+        let mut rng = StdRng::seed_from_u64(1);
+        for count in 0..=4 {
+            let artists: Vec<_> = (0..count).map(|i| format!("Artist {i}")).collect();
+            let mut rotation = SmartDjRotation::default();
+            for _ in 0..8 {
+                rotation.request_next();
+                assert_eq!(rotation.choose(artists.clone(), &mut rng), artists);
+            }
+        }
+    }
+
+    #[test]
+    fn smart_dj_uses_distinct_nonempty_local_artists_and_retains_the_group() {
+        let tracks: Vec<_> = ["One", "Two", "One", "", " ", "Three", "Four", "Five"]
+            .iter()
+            .enumerate()
+            .map(|(i, artist)| Track {
+                path: format!("track{i}").into(),
+                artist: (*artist).into(),
+                ..Track::default()
+            })
+            .collect();
+        let mut rotation = SmartDjRotation::default();
+        let (first, more) = smart_dj_seeds(&tracks, &[], &[], &mut rotation);
+        assert!(more);
+        assert_eq!(first.len(), 4);
+        assert_eq!(
+            first
+                .iter()
+                .map(|t| &t.artist)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            4
+        );
+        assert!(first.iter().all(|track| tracks.contains(track)));
+        let (again, _) = smart_dj_seeds(&tracks, &tracks[1..2], &[], &mut rotation);
+        assert_eq!(
+            first.iter().map(|t| &t.artist).collect::<Vec<_>>(),
+            again.iter().map(|t| &t.artist).collect::<Vec<_>>()
+        );
+        let (small, more) = smart_dj_seeds(&tracks[..3], &[], &[], &mut rotation);
+        assert!(!more);
+        assert_eq!(small.len(), 2);
+    }
+
     #[test]
     fn mosaics_keep_recent_album_order_and_skip_missing_and_duplicate_paths() {
         let a = Track {

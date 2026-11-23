@@ -1,6 +1,6 @@
 'use strict';
-const SHELL = 'gnune-shell-v7';
-const FILES = ['/', '/catalog.js', '/app.js', '/style.css', '/manifest.webmanifest', '/icon.svg', '/icon-192.png', '/icon-512.png'];
+const SHELL = 'gnune-shell-v12';
+const FILES = ['/', '/catalog.js', '/app.js', '/style.css', '/manifest.webmanifest', '/favicon.ico', '/gnune-touch-icon-180-v1.png', '/apple-touch-icon.png', '/apple-touch-icon-precomposed.png', '/icon.svg', '/icon-192.png', '/icon-512.png'];
 self.addEventListener('install', event => event.waitUntil(caches.open(SHELL).then(cache => cache.addAll(FILES))));
 self.addEventListener('activate', event => event.waitUntil((async () => {
   for (const name of await caches.keys()) if (name.startsWith('gnune-shell-') && name !== SHELL) await caches.delete(name);

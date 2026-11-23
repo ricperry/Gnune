@@ -53,6 +53,7 @@ popover button:hover { color:@gn_ink; background:alpha(@gn_ink,.10); }
     min-height:23px; min-width:23px; -gtk-icon-size:11px; }
 .transport .play { min-height:32px; min-width:32px; color:@gn_accent; -gtk-icon-size:16px; }
 .transport .round:hover { color:@gn_accent; }
+.transport .rewind { border-color:transparent; -gtk-icon-size:24px; }
 .shortcuts button { padding:6px; -gtk-icon-size:20px; }
 .clock { color:@gn_muted; font-size:10px; font-feature-settings:"tnum"; }
 .now-title { font-size:12px; }
@@ -63,7 +64,7 @@ scale highlight { min-height:2px; background:@gn_accent; }
 scale slider { min-width:7px; min-height:7px; margin:-3px; background:@gn_ink; border:0; }
 scale.vertical { padding:8px; }
 scale.vertical trough, scale.vertical highlight { min-width:3px; }
-.dialog { padding:30px 34px; }
+.dialog { padding:48px 34px 30px; }
 .section { font-size:24px; font-weight:350; margin-top:10px; }
 .item { padding:2px 0; border-bottom:1px solid alpha(@gn_line,.45); }
 .tile { padding:5px; }
@@ -82,7 +83,7 @@ checkbutton { padding:5px; }
 checkbutton check:checked { background:@gn_accent; color:@gn_canvas; }
 .compact .nav { padding:7px 12px 0; }
 .compact .nav .pivot { font-size:18px; padding:2px 0; }
-.compact .nav .brand { margin-left:5px; margin-right:71px; }
+.compact .nav .brand { margin-left:5px; margin-right:88px; }
 .compact .hero { padding:12px; }
 .compact .hero-title { font-size:36px; }
 .compact .transport { padding:5px 10px 7px; }
@@ -119,11 +120,14 @@ checkbutton check:checked { background:@gn_accent; color:@gn_canvas; }
 .collection-panes separator { background:alpha(@gn_line,.68); min-width:1px; }
 .compact .collection { padding:0 16px 8px; }
 .compact .collection-modes button { font-size:12px; padding:3px 5px; }
-.window-controls { background:alpha(@gn_panel,.95); color:@gn_ink; border-radius:2px; padding:1px; }
+.window-controls, .window-controls button, .window-controls button:hover,
+.window-controls button:active, .window-controls button:focus {
+    background:transparent; box-shadow:none;
+}
+.window-controls { color:@gn_ink; padding:1px; }
 .window-controls button { min-width:30px; min-height:30px; padding:0; color:inherit; -gtk-icon-size:14px; }
-.window-controls button:hover { background:alpha(@gn_ink,.16); }
+.window-controls button:hover, .window-controls button:active { color:@gn_accent; }
 .window-controls button:focus-visible { outline:2px solid currentColor; outline-offset:-3px; }
-.window-controls button.close:hover { background:#aa2552; color:white; }
 .collection-order { color:@gn_muted; font-size:10px; font-weight:600; }
 .collection-release { font-size:18px; font-weight:400; }
 .collection-artists scrolledwindow,.collection-albums scrolledwindow {
@@ -152,7 +156,7 @@ box.quickplay-page { margin-top:65px; margin-bottom:30px; }
 window.metadata-dialog { border:1px solid @gn_line; }
 .video-frame { background-color:#090909; }
 
-.photo-grid, .video-grid { background:transparent; color:inherit; }
+.video-grid { background:transparent; color:inherit; }
 .video-grid > child { padding:0; }
 .video-tile { margin:4px 12px 16px 0; }
 .video-play { padding:0; }
@@ -160,3 +164,21 @@ window.metadata-dialog { border:1px solid @gn_line; }
 .video-poster { background-color:@gn_panel; color:@gn_muted; }
 .video-duration { color:white; background-color:rgba(0,0,0,.68); font-size:10px; padding:1px 4px; margin:4px; }
 .video-info-link { padding:2px 3px; color:@gn_muted; -gtk-icon-size:14px; }
+
+.podcast-add { font-size:24px; color:@gn_accent; padding:12px 18px; }
+.podcast-card { padding:12px 18px 18px; border-bottom:1px solid @gn_line; }
+.podcast-card .section { margin-top:0; }
+.podcast-publisher { font-weight:600; }
+.podcast-summary { font-size:14px; }
+.podcast-hint { font-size:12px; }
+.podcast-error { color:@gn_accent; }
+
+.podcast-list, .podcast-list > row { background:transparent; color:@gn_ink; }
+.podcast-list > row { padding:0; }
+
+.podcast-tile { padding:8px; min-width:164px; }
+.podcast-artwork { background:alpha(@gn_ink,0.04); }
+.podcast-show { padding-top:12px; }
+.podcast-episode { padding:14px 18px; border-bottom:1px solid @gn_line; }
+.podcast-episode-summary { font-size:14px; }
+.podcast-synopsis { font-size:15px; }

@@ -6,6 +6,7 @@ mod pairing;
 mod quickplay;
 mod videos;
 pub(crate) use collection::Browser;
+pub(crate) use quickplay::SmartDjRotation;
 pub(crate) use videos::VideoGallery;
 
 #[derive(PartialEq)]
@@ -18,7 +19,10 @@ pub(super) struct ViewState {
 impl Ui {
     pub(super) fn render(self: &Rc<Self>) {
         let page = self.page.borrow().clone();
-        let listening = matches!(page, Page::Now | Page::Wall | Page::Showcase);
+        let listening = matches!(
+            page,
+            Page::Now | Page::Wall | Page::Showcase | Page::PodcastNow
+        );
         let view = ViewState {
             page: page.clone(),
             listening_track: if listening {
@@ -29,6 +33,30 @@ impl Ui {
             fullscreen_art: listening && self.win.is_fullscreen(),
         };
         let prior = self.rendered_page.borrow();
+        if prior.as_ref() == Some(&view)
+            && match &page {
+                Page::Collection(tab) if tab == "podcasts/browse" => self.podcast_browser_mounted(),
+                Page::Collection(tab) if tab == "podcasts" => self
+                    .podcast_grid
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|view| view.root.parent().is_some()),
+                Page::Podcast(feed) => self
+                    .podcast_show
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|view| &view.feed == feed && view.root.parent().is_some()),
+                _ => false,
+            }
+        {
+            // Sharing retries, fullscreen notifications and playback updates are
+            // independent of discovery. Keep its scroller, focus and rows mounted.
+            drop(prior);
+            self.update_surface(&page);
+            self.update_thumbnail();
+            return;
+        }
+
         // A live video sink keeps its own presentation clock during navigation.
         let live_video =
             page == Page::Video || prior.as_ref().is_some_and(|p| p.page == Page::Video);
@@ -45,6 +73,9 @@ impl Ui {
         if live_video {
             self.motion.cancel();
         }
+        self.podcast_browser.borrow_mut().view.take();
+        self.podcast_grid.borrow_mut().take();
+        self.podcast_show.borrow_mut().take();
         clear(&self.body);
         self.browser.take();
         self.videos.take();
@@ -58,17 +89,25 @@ impl Ui {
         while let Some(w) = child {
             if let Ok(b) = w.clone().downcast::<gtk::Button>() {
                 let selected = match b.label().as_deref() {
-                    Some("device") => page == Page::Devices,
                     Some("quickplay") => page == Page::Quick,
                     Some("now playing") => {
                         matches!(
                             page,
-                            Page::Now | Page::Wall | Page::Lyrics | Page::Showcase | Page::Video
+                            Page::Now
+                                | Page::Wall
+                                | Page::Lyrics
+                                | Page::Showcase
+                                | Page::Video
+                                | Page::PodcastNow
                         )
                     }
                     Some("collection") => matches!(
                         page,
-                        Page::Collection(_) | Page::Album(_) | Page::Artist(_) | Page::Playlist(_)
+                        Page::Collection(_)
+                            | Page::Album(_)
+                            | Page::Artist(_)
+                            | Page::Playlist(_)
+                            | Page::Podcast(_)
                     ),
                     _ => false,
                 };
@@ -80,12 +119,24 @@ impl Ui {
             }
             child = w.next_sibling();
         }
+        if page == Page::PodcastNow {
+            self.podcast_listening_page();
+            return;
+        }
         if page == Page::Video {
             self.embedded_view();
             return;
         }
         if matches!(page, Page::Now | Page::Showcase | Page::Wall) {
             self.hero(page == Page::Showcase, page == Page::Wall);
+            return;
+        }
+        if let Page::Podcast(feed) = &page {
+            let root = col(12);
+            root.set_vexpand(true);
+            root.add_css_class("collection");
+            self.body.append(&root);
+            self.podcast_show_page(feed, &root);
             return;
         }
         if let Page::Collection(tab) = &page {
@@ -289,7 +340,7 @@ impl Ui {
             _ => {}
         }
     }
-    fn hero(self: &Rc<Self>, showcase: bool, wall: bool) {
+    pub(super) fn hero(self: &Rc<Self>, showcase: bool, wall: bool) {
         let track = self.current().or_else(|| {
             self.db
                 .borrow()
@@ -896,16 +947,7 @@ impl Ui {
         }
     }
     fn sharing_started(self: &Rc<Self>, session: sync::Session) {
-        if let Some(action) = self
-            .win
-            .application()
-            .and_then(|app| app.lookup_action("include-share-videos"))
-        {
-            action
-                .downcast::<gio::SimpleAction>()
-                .expect("stateful sharing action")
-                .set_state(&session.include_video.to_variant());
-        }
+        session.publish(&self.db.borrow());
         *self.server.borrow_mut() = Some(session);
         self.sharing_pending.set(false);
         self.sharing_retry.set(None);
@@ -914,7 +956,8 @@ impl Ui {
         self.notice("");
         self.render();
     }
-    fn sharing_failed(self: &Rc<Self>, error: sync::SharingError) {
+    fn sharing_failed(self: &Rc<Self>, error: sync::SharingError, background: bool) {
+        let changed = self.sharing_problem.borrow().as_ref() != Some(&error.message);
         self.sharing_pending
             .set(error.waiting || self.sharing_pending.get());
         self.sharing_retry.set(if error.retryable {
@@ -925,16 +968,20 @@ impl Ui {
             None
         });
         *self.sharing_problem.borrow_mut() = Some(error.message.clone());
-        self.notice(&error.message);
-        self.render();
+        if !background {
+            self.notice(&error.message);
+        }
+        if changed && *self.page.borrow() == Page::Devices {
+            self.render();
+        }
     }
     pub(super) fn restore_sharing(self: &Rc<Self>) {
         if self.protect || self.server.borrow().is_some() {
             return;
         }
         let tx = self.tx.clone();
-        let result = sync::resume(&self.db.borrow(), move |p, t| {
-            let _ = tx.send(Event::Progress(p, t));
+        let result = sync::resume(&self.db.borrow(), move |change| {
+            let _ = tx.send(Event::Phone(change));
         });
         match result {
             Ok(Some(session)) => self.sharing_started(session),
@@ -944,17 +991,10 @@ impl Ui {
                 self.sharing_problem.borrow_mut().take();
                 self.render();
             }
-            Err(error) => self.sharing_failed(error),
+            Err(error) => self.sharing_failed(error, true),
         }
     }
     fn stop_sharing(self: &Rc<Self>) {
-        if let Some(action) = self
-            .win
-            .application()
-            .and_then(|app| app.lookup_action("include-share-videos"))
-        {
-            action.change_state(&false.to_variant());
-        }
         self.sharing_retry.set(None);
         self.sharing_pending.set(false);
         self.sharing_retry_delay.set(5);
@@ -969,189 +1009,224 @@ impl Ui {
         }
         self.render();
     }
-    pub(super) fn share_queue(self: &Rc<Self>) {
-        if self.server.borrow().is_some() {
-            self.go(Page::Devices);
-            return;
-        }
-        let q = self.queue.borrow().clone();
-        if q.is_empty() {
-            self.notice("Play a playlist or album to select music to share.");
-            return;
-        }
-        let tx = self.tx.clone();
-        match sync::start(q, move |p, t| {
-            let _ = tx.send(Event::Progress(p, t));
-        }) {
-            Ok(s) => {
-                self.sharing_started(s);
-                self.go(Page::Devices)
-            }
-            Err(e) => self.sharing_failed(e),
-        }
+    pub(super) fn show_devices(self: &Rc<Self>) {
+        self.navigate(Page::Devices);
     }
     pub(super) fn copy_pairing_link(&self) {
         if let Some(s) = self.server.borrow().as_ref() {
-            self.win.clipboard().set_text(&s.url);
-            self.notice("Pairing link copied.");
+            if s.can_pair_phone() && s.pairing_status() == sync::PairingStatus::Ready {
+                self.win.clipboard().set_text(&s.url);
+                self.notice("Pairing link copied.");
+            } else {
+                self.notice("Choose Pair phone before copying a link.");
+            }
         }
     }
-    pub(super) fn share_library(self: &Rc<Self>) {
-        if self.server.borrow().is_some() {
-            self.notice("Stop sharing first, then choose Share full music library over Wi-Fi. Existing phone permissions will stay unchanged.");
-            self.go(Page::Devices);
+    pub(super) fn pair_phone(self: &Rc<Self>) {
+        if let Err(error) = sync::pairing_setup() {
+            self.notice(&error);
+            self.navigate(Page::Devices);
+            return;
+        }
+        let updated = self
+            .server
+            .borrow_mut()
+            .as_mut()
+            .map(|s| s.pair_phone(&self.db.borrow()));
+        if let Some(result) = updated {
+            match result {
+                Ok(()) => {
+                    self.notice("");
+                    self.show_devices();
+                }
+                Err(error) => self.notice(&error),
+            }
             return;
         }
         let tx = self.tx.clone();
-        let include_videos = self
-            .win
-            .application()
-            .and_then(|app| app.lookup_action("include-share-videos"))
-            .and_then(|action| action.state())
-            .and_then(|value| value.get::<bool>())
-            .unwrap_or(false);
-        match sync::start_library(&self.db.borrow(), include_videos, move |p, t| {
-            let _ = tx.send(Event::Progress(p, t));
+        match sync::pair_phone(&self.db.borrow(), move |change| {
+            let _ = tx.send(Event::Phone(change));
         }) {
             Ok(session) => {
                 self.sharing_started(session);
-                self.go(Page::Devices);
+                self.show_devices();
             }
-            Err(error) => self.sharing_failed(error),
+            Err(error) => self.sharing_failed(error, false),
         }
     }
     fn devices(self: &Rc<Self>, list: &gtk::Box) {
-        let help = |text: &str| {
-            let note = label(text, "subtitle");
-            note.set_ellipsize(gtk::pango::EllipsizeMode::None);
-            note.set_wrap(true);
-            note.set_max_width_chars(80);
-            list.append(&note);
+        list.set_spacing(24);
+        list.set_halign(gtk::Align::Start);
+        let note = |text: &str, width: i32| {
+            let l = label(text, "subtitle");
+            l.set_ellipsize(gtk::pango::EllipsizeMode::None);
+            l.set_wrap(true);
+            l.set_max_width_chars(width);
+            l
         };
-        if let Some(s) = self.server.borrow().as_ref() {
-            let panel = row(20);
+        let action = |text: &str, name: &str| {
+            let button = gtk::Button::with_label(text);
+            button.set_action_name(Some(name));
+            button.set_halign(gtk::Align::Start);
+            button
+        };
+        let setup = sync::pairing_setup();
+        let active = self
+            .server
+            .borrow()
+            .as_ref()
+            .is_some_and(|s| s.can_pair_phone());
+        if let Some(s) = self.server.borrow().as_ref().filter(|s| s.can_pair_phone()) {
+            let status = s.pairing_status();
+            let panel = gtk::Box::new(
+                if self.compact.get() {
+                    gtk::Orientation::Vertical
+                } else {
+                    gtk::Orientation::Horizontal
+                },
+                20,
+            );
             panel.set_valign(gtk::Align::Start);
             list.append(&panel);
-            match pairing::qr(&s.url) {
-                Ok(qr) => panel.append(&qr),
-                Err(_) => {
-                    panel.append(&label("QR unavailable. Use Copy pairing link.", "subtitle"))
+            if status == sync::PairingStatus::Ready {
+                match pairing::qr(&s.url) {
+                    Ok(qr) => panel.append(&qr),
+                    Err(_) => panel.append(&note("QR unavailable. Use Copy pairing link.", 28)),
                 }
             }
             let controls = col(8);
             controls.set_valign(gtk::Align::Start);
-            controls.set_hexpand(true);
+            controls.set_halign(gtk::Align::Start);
             panel.append(&controls);
-            controls.append(&label("Scan to pair your phone", "section"));
-            let scope = match s.mode {
-                sync::ShareMode::Queue => format!("Current queue · {} songs", s.track_count),
-                sync::ShareMode::Library => format!(
-                    "Full music library · {} songs{}",
-                    s.track_count,
-                    if s.include_video {
-                        " + collection videos"
-                    } else {
-                        " · music only"
-                    }
-                ),
-            };
-            let scope_label = label(&scope, "track");
-            scope_label.set_ellipsize(gtk::pango::EllipsizeMode::None);
-            scope_label.set_wrap(true);
-            scope_label.set_max_width_chars(28);
+            controls.append(&label(
+                match status {
+                    sync::PairingStatus::Ready => "Scan to pair your phone",
+                    sync::PairingStatus::Checking => "Checking Tailscale connection",
+                    sync::PairingStatus::Unavailable => "Tailscale connection unavailable",
+                    sync::PairingStatus::Used => "Phone paired",
+                    sync::PairingStatus::Expired => "Pairing QR expired",
+                    sync::PairingStatus::Limited => "Pairing paused",
+                },
+                "section",
+            ));
+            let scope = format!("{} songs · videos · podcasts", s.track_count);
+            let scope_label = note(&scope, 30);
+            scope_label.add_css_class("track");
             controls.append(&scope_label);
-            let instructions = label(
-                "On the same Wi-Fi, scan with your phone camera and tap Pair phone.",
-                "subtitle",
+            controls.append(&note(match status {
+                sync::PairingStatus::Ready => "With Tailscale connected, scan the QR with your phone’s camera. Tap Pair phone on your phone.",
+                sync::PairingStatus::Checking => "Your QR will appear when this PC can reach the phone player over Tailscale.",
+                sync::PairingStatus::Unavailable => "Reconnect Tailscale on this PC and check that Tailscale Serve is running. Gnune will check again automatically.",
+                sync::PairingStatus::Used => "This code has been used. Choose Pair another phone to create a new QR.",
+                sync::PairingStatus::Expired => "Codes last 10 minutes. Choose Pair phone to create a new QR.",
+                sync::PairingStatus::Limited => "Too many unsuccessful attempts. Choose Pair phone when you are ready to try again.",
+            }, 30));
+            if status == sync::PairingStatus::Ready {
+                controls.append(&note("Single use · valid for 10 minutes.", 30));
+            }
+            let pair = action(
+                match status {
+                    sync::PairingStatus::Ready => "Refresh QR",
+                    sync::PairingStatus::Used => "Pair another phone",
+                    _ => "Pair phone",
+                },
+                "app.pair-phone",
             );
-            instructions.set_ellipsize(gtk::pango::EllipsizeMode::None);
-            instructions.set_wrap(true);
-            instructions.set_max_width_chars(28);
-            controls.append(&instructions);
-            controls.append(&label("Single use · valid for 10 minutes.", "subtitle"));
-            controls.append(&app_button(self, "New pairing QR", |u| {
-                if let Some(session) = u.server.borrow_mut().as_mut() {
-                    session.renew_pairing();
-                }
-                u.render();
-            }));
-            let l = label(&s.url, "track");
-            l.set_selectable(true);
-            l.set_ellipsize(gtk::pango::EllipsizeMode::None);
-            l.set_wrap(true);
-            let link = gtk::Expander::new(Some("Pairing link"));
-            link.set_child(Some(&l));
-            list.append(&link);
-            let copy = gtk::Button::with_label("Copy pairing link");
-            copy.set_action_name(Some("app.copy-pairing-link"));
-            controls.append(&copy);
-            controls.append(&app_button(self, "Stop sharing", |u| {
-                u.stop_sharing();
-            }));
+            pair.set_sensitive(status != sync::PairingStatus::Checking);
+            controls.append(&pair);
+            if status == sync::PairingStatus::Ready {
+                let link = gtk::Expander::new(Some("Pairing link"));
+                let details = col(8);
+                let url = note(&s.url, 30);
+                url.set_selectable(true);
+                details.append(&url);
+                details.append(&action("Copy pairing link", "app.copy-pairing-link"));
+                link.set_child(Some(&details));
+                controls.append(&link);
+            }
             if s.skipped > 0 {
-                list.append(&label(
+                list.append(&note(
                     &format!(
-                        "{} unavailable files omitted from this library snapshot.",
+                        "{} unavailable files omitted from this snapshot.",
                         s.skipped
                     ),
-                    "subtitle",
+                    62,
                 ));
             }
-            help(
-                "Sharing resumes when Gnune reopens, without starting playback. Stop sharing keeps it off. Queue phones keep their exact selection; library phones see the collection permitted by their original music/video choice.",
-            );
+            // Update a consumed, expired or locked code without creating a new one.
+            // The weak panel also ends this timer when another page is mounted.
+            let weak_panel = panel.downgrade();
+            let weak_ui = Rc::downgrade(self);
+            glib::timeout_add_local(Duration::from_secs(1), move || {
+                if weak_panel
+                    .upgrade()
+                    .is_none_or(|panel| panel.root().is_none())
+                {
+                    return glib::ControlFlow::Break;
+                }
+                let Some(ui) = weak_ui.upgrade() else {
+                    return glib::ControlFlow::Break;
+                };
+                let changed = ui
+                    .server
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|s| s.pairing_status() != status);
+                if changed {
+                    ui.render();
+                    return glib::ControlFlow::Break;
+                }
+                glib::ControlFlow::Continue
+            });
         } else {
-            list.append(&bluetooth::panel());
-            list.append(&label("Music on your phone over Wi-Fi", "section"));
+            let connection = col(8);
+            list.append(&connection);
+            connection.append(&label(
+                if setup.is_err() {
+                    "Connect with Tailscale"
+                } else if self.sharing_pending.get() {
+                    "Sharing needs attention"
+                } else {
+                    "Your collection on your phone"
+                },
+                "section",
+            ));
+            connection.append(&note(
+                if setup.is_err() { "Set up Tailscale on this PC and your phone to pair securely at home or away." }
+                else if self.sharing_pending.get() { "The saved connection is unavailable. Pair phone retries with your full collection." }
+                else { "Share your music, playlists, collection videos and subscribed podcasts over Tailscale." }, 62,
+            ));
+            if let Err(problem) = &setup {
+                let details = gtk::Expander::new(Some("Tailscale setup"));
+                details.set_child(Some(&note(problem, 62)));
+                connection.append(&details);
+            }
             if let Some(problem) = self.sharing_problem.borrow().as_ref() {
-                let text = label(problem, "subtitle");
-                text.set_wrap(true);
-                list.append(&text);
-                list.append(&app_button(self, "Retry saved sharing", |u| {
-                    u.restore_sharing()
-                }));
+                let details = gtk::Expander::new(Some("Connection details"));
+                details.set_child(Some(&note(problem, 62)));
+                connection.append(&details);
             }
-            if self.sharing_pending.get() {
-                let text = label(
-                    if self.sharing_retry.get().is_some() {
-                        "Waiting for the configured Wi-Fi address. Gnune will retry automatically."
-                    } else {
-                        "Saved sharing is enabled but needs attention. Retry after fixing the connection settings."
-                    },
-                    "subtitle",
-                );
-                text.set_wrap(true);
-                list.append(&text);
-                list.append(&app_button(self, "Stop sharing", |u| u.stop_sharing()));
+            let pair = action("Pair phone", "app.pair-phone");
+            pair.set_sensitive(setup.is_ok());
+            connection.append(&pair);
+        }
+        let details = col(8);
+        details.append(&note("Pair phone refreshes the collection and creates a new single-use QR. Existing phones keep their original permissions; pair them again to grant the full collection. Sharing resumes when Gnune reopens. Stop sharing keeps it off.", 62));
+        let permissions = gtk::Expander::new(Some("About sharing"));
+        permissions.set_child(Some(&details));
+        list.append(&permissions);
+        if active || self.server.borrow().is_some() || self.sharing_pending.get() {
+            let stop = app_button(self, "Stop sharing", |u| u.stop_sharing());
+            stop.set_halign(gtk::Align::Start);
+            list.append(&stop);
+        }
+        let bluetooth = gtk::Expander::new(Some("Bluetooth phones"));
+        bluetooth.connect_expanded_notify(|expander| {
+            if expander.is_expanded() && expander.child().is_none() {
+                expander.set_child(Some(&bluetooth::panel()));
             }
-            help(
-                "Share a queue, or explicitly allow a new phone to browse your full music collection and saved playlists. Audio transfers only when it plays.",
-            );
-            let pair = gtk::Button::with_label("Pair phone with current queue");
-            pair.set_action_name(Some("app.share-queue"));
-            list.append(&pair);
-            let videos = gtk::CheckButton::with_label("Include collection videos");
-            videos.set_action_name(Some("app.include-share-videos"));
-            list.append(&videos);
-            let library = gtk::Button::with_label("Share full music library over Wi-Fi");
-            library.set_action_name(Some("app.share-library"));
-            list.append(&library);
-            help(
-                "Choose once: sharing resumes each time Gnune opens, without starting playback. Queue access stays fixed. Full-library access refreshes your collection on restart. Stop sharing keeps access off until you enable it again.",
-            );
-        }
-        if self.server.borrow().is_some() {
-            list.append(&bluetooth::panel());
-        }
-        let progress = self.db.borrow().phone_progress.clone();
-        for (p, n) in progress {
-            if let Some(t) = self.track(&p) {
-                let b = gtk::Button::with_label(&format!("Resume {} at {}", t.title, time(n)));
-                b.set_action_name(Some("app.resume-from-phone"));
-                b.set_action_target_value(Some(&t.id.to_variant()));
-                list.append(&b);
-            }
-        }
+        });
+        list.append(&bluetooth);
     }
 }
 fn scroller(child: &gtk::Box) -> gtk::ScrolledWindow {
@@ -1164,7 +1239,7 @@ fn scroller(child: &gtk::Box) -> gtk::ScrolledWindow {
 
 // Capture secondary clicks before GtkWindowHandle can open the window menu.
 // Each tile owns one set of controllers; recycled list items replace the tile.
-fn tile_context_menu(tile: &gtk::Button, popup: impl Fn(&gtk::Button) + 'static) {
+pub(super) fn tile_context_menu<W: IsA<gtk::Widget>>(tile: &W, popup: impl Fn(&W) + 'static) {
     let popup = Rc::new(popup);
     let menu = gtk::GestureClick::new();
     menu.set_button(3);
@@ -1193,10 +1268,10 @@ fn tile_context_menu(tile: &gtk::Button, popup: impl Fn(&gtk::Button) + 'static)
         glib::Propagation::Proceed
     });
     tile.add_controller(keys);
-    tile.connect_unmap(close_tile_menu);
+    tile.connect_unmap(|tile| close_tile_menu(tile));
 }
 
-fn close_tile_menu(tile: &gtk::Button) {
+pub(super) fn close_tile_menu(tile: &impl IsA<gtk::Widget>) {
     let mut child = tile.first_child();
     while let Some(widget) = child {
         child = widget.next_sibling();

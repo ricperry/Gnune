@@ -2,8 +2,8 @@
 <html lang="en">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#111014"><meta name="apple-mobile-web-app-capable" content="yes">
-<link rel="manifest" href="/manifest.webmanifest"><link rel="icon" type="image/png" href="/icon-192.png"><link rel="apple-touch-icon" href="/icon-192.png"><link rel="stylesheet" href="/style.css">
+<meta name="theme-color" content="#111014"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="Gnune">
+<link rel="manifest" href="/manifest.webmanifest"><link rel="icon" type="image/x-icon" sizes="16x16 32x32 48x48 64x64" href="/favicon.ico"><link rel="apple-touch-icon" sizes="180x180" href="/gnune-touch-icon-180-v1.png"><link rel="stylesheet" href="/style.css">
 <title>Gnune music</title>
 </head>
 <body><main>
@@ -11,31 +11,33 @@
 <p id="status" role="status">Opening your music…</p>
 <section id="pairing" hidden>
 <h1>pair your phone</h1>
-<p id="pair-help">Scan the QR in desktop Devices or enter its link below.</p>
+<p id="pair-help">Connect Tailscale, then scan the QR in desktop Devices or enter its link below.</p>
 <p id="replace-help" hidden>Switching changes this app’s music view. Saved audio and pending progress stay in their original pairing; nothing is unpaired or deleted.</p>
 <details id="manual-pairing"><summary>Use a pairing code or link instead</summary><label>Pairing code or link<input id="pair-code" autocomplete="off" autocapitalize="off" spellcheck="false"></label></details>
 <label>Phone name<input id="device-name" maxlength="60" placeholder="My phone"></label>
 <div class="actions"><button id="pair" disabled>Pair phone</button><button id="cancel-pair" class="secondary" hidden>Keep current pairing</button></div>
-<p>Browse on Wi-Fi. Only the song playing now transfers and is saved on this phone when storage allows. Adding songs to up next never downloads them.</p>
+<p>Keep Tailscale connected on your phone and desktop. Only the song playing now transfers and is saved on this phone when storage allows. Adding songs to up next never downloads them.</p>
 </section>
 <section id="library" hidden>
-<h1 class="music-title">music</h1><p id="scope-label" class="eyebrow"></p>
-<nav id="pivots" class="pivots" aria-label="Music categories"><button data-pivot="artists">artists</button><button data-pivot="albums">albums</button><button data-pivot="songs">songs</button><button data-pivot="playlists">playlists</button><button data-pivot="videos" hidden>videos</button><button data-pivot="video-playlists" hidden>video playlists</button></nav>
-<div class="browse-tools"><button id="back" class="text-button" hidden>‹ back</button><label class="search-label"><span class="sr-only">Search this view</span><input id="search" type="search" placeholder="search music" autocomplete="off"></label><button id="offline-filter" class="filter" aria-pressed="false">on phone</button></div>
+<h1 class="music-title" id="area-title">quickplay</h1><p id="scope-label" class="eyebrow"></p>
+<nav id="areas" class="pivots" aria-label="Collection"><button data-area="quickplay">quickplay</button><button data-area="music">music</button><button data-area="videos">videos</button><button data-area="podcasts">podcasts</button></nav>
+<nav id="pivots" class="pivots" aria-label="Music categories"><button data-pivot="artists">artists</button><button data-pivot="albums">albums</button><button data-pivot="songs">songs</button><button data-pivot="playlists">playlists</button></nav>
+<nav id="video-pivots" class="pivots" aria-label="Video categories" hidden><button data-pivot="videos">videos</button><button data-pivot="video-playlists">playlists</button></nav>
+<div class="browse-tools"><button id="back" class="text-button" hidden>‹ back</button><label class="search-label"><span class="sr-only">Search this view</span><input id="search" type="search" placeholder="search collection" autocomplete="off"></label><button id="offline-filter" class="filter" aria-pressed="false">on phone</button></div>
 <div id="view-heading"><h2 id="view-title"></h2><p id="view-subtitle"></p></div>
 <div id="view-actions" class="actions" hidden><button id="play-view">play</button><button id="shuffle-view" class="secondary">shuffle</button><button id="queue-view" class="secondary">add to up next</button></div>
-<div id="browse" aria-live="off"></div><button id="more" class="secondary" hidden>show more</button>
+<button id="album-pin" class="secondary" hidden>pin album</button><div id="browse" aria-live="off"></div><button id="more" class="secondary" hidden>show more</button>
 <p id="summary" class="muted"></p>
 </section>
 <section id="player" hidden aria-label="Now playing">
-<div class="player-top"><button id="player-back" class="text-button">‹ music</button><button id="show-queue" class="text-button">up next ›</button></div>
+<div class="player-top"><button id="player-back" class="text-button">‹ collection</button><button id="show-queue" class="text-button">up next ›</button></div>
 <p class="eyebrow">now playing</p><h1 id="now-artist"></h1><div id="now-cover" class="now-cover"></div><h2 id="now-title"></h2><button id="now-album" class="text-button"></button>
 <audio id="audio" controls preload="none"></audio><video id="video" controls playsinline preload="none" hidden></video>
-<div class="player-actions"><button id="previous" class="secondary" aria-label="Previous song">‹‹</button><button id="shuffle" class="secondary" aria-pressed="false">shuffle</button><button id="repeat" class="secondary" aria-pressed="false">repeat</button><button id="next" class="secondary" aria-label="Next song">››</button></div><p id="queue-summary" class="muted"></p>
+<div class="player-actions"><button id="rewind" class="secondary">back 10s</button><button id="previous" class="secondary" aria-label="Previous song">‹‹</button><button id="shuffle" class="secondary" aria-pressed="false">shuffle</button><button id="repeat" class="secondary" aria-pressed="false">repeat</button><button id="next" class="secondary" aria-label="Next song">››</button></div><p id="queue-summary" class="muted"></p>
 </section>
 <footer>
-<details id="settings"><summary>connection &amp; storage</summary><p id="offline-status" role="status">Preparing offline player…</p><div class="actions"><button id="change-pairing" class="secondary">Change pairing</button><button id="refresh" class="secondary">refresh music</button><button id="sync" class="secondary">sync progress</button><button id="forget" class="secondary">remove saved audio</button><button id="unpair" class="secondary">unpair phone</button></div><p>Saved songs work offline in this browser. Keep Gnune open during transfer and reconnect to your desktop Wi-Fi to return listening progress. Your phone may remove browser storage to free space. Original audio format support depends on your browser.</p></details>
-<details><summary>optional: Home Screen app</summary><p>Pair in Safari first, then use Share → Add to Home Screen. New Home Screen apps on iOS 17.2 or later can recover the same pairing online. Existing icons without a saved pairing must pair once there. Android offers Install app. Saved songs stay in the browser or app where they played.</p></details>
+<details id="settings"><summary>connection &amp; storage</summary><p id="offline-status" role="status">Preparing offline player…</p><div class="actions"><button id="change-pairing" class="secondary">Change pairing</button><button id="refresh" class="secondary">refresh collection</button><button id="sync" class="secondary">sync progress</button><button id="forget" class="secondary">remove saved audio</button><button id="unpair" class="secondary">unpair phone</button></div><p>Saved songs work offline in this browser. Keep Gnune open during transfer and connect Tailscale to return listening progress. Your phone may remove browser storage to free space. Original audio format support depends on your browser.</p></details>
+<details><summary>optional: Home Screen app</summary><p>Pair in Safari first, then use Share → Add to Home Screen. New Home Screen apps on iOS 17.2 or later can recover the same pairing online. Existing icons without a saved pairing must pair once there. Android offers Install app. Saved songs stay in the browser or app where they played.</p><p>If Safari shows a plain G icon, open while connected, close all Gnune tabs and the Home Screen app, then reopen Safari and check Share → Add to Home Screen. Keep the existing app and its saved songs until you have verified the new icon and pairing; do not clear website data.</p></details>
 </footer>
 </main>
 <aside id="mini-player" hidden aria-label="Current song"><button id="mini-open"><span id="mini-art" class="mini-art"></span><span><strong id="mini-title"></strong><small id="mini-artist"></small></span></button><button id="mini-toggle" aria-label="Play current song">▶</button><button id="mini-next" aria-label="Next song">››</button></aside>

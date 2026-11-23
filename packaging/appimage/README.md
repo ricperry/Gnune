@@ -12,7 +12,7 @@ python3 packaging/appimage/build.py \
   --binary "$PWD/target/pkg-work/flatpak/sdk/files/bin/gnune" \
   --media-prefix "$PWD/target/pkg-work/flatpak/sdk/files" \
   --work /tmp/gnune-appimage-build \
-  --output "$PWD/dist/Gnune-0.2.0-x86_64.AppImage" \
+  --output "$PWD/dist/Gnune-0.3.0-x86_64.AppImage" \
   --appimagetool /path/to/appimagetool-1.9.1-x86_64.AppImage \
   --runtime-file /path/to/appimagetool-1.9.1-runtime-x86_64
 ```
@@ -54,7 +54,7 @@ font configuration/fonts, a Wayland or X11 session, system CA trust and an audio
 server. No proprietary drivers are bundled. The measured glibc floor is written
 into appimage-build-info.json; this is not an AppImage for older Linux releases.
 Use the Flatpak for systems whose glibc is older. Normal AppImage mounting needs
-FUSE; `APPIMAGE_EXTRACT_AND_RUN=1 ./Gnune-0.2.0-x86_64.AppImage` runs without FUSE.
+FUSE; `APPIMAGE_EXTRACT_AND_RUN=1 ./Gnune-0.3.0-x86_64.AppImage` runs without FUSE.
 
 The launcher uses only its bundled plugin directory and a Gnune-specific registry,
 relocates loader definitions into a private temporary directory, and honors custom
@@ -68,7 +68,7 @@ libx264/libvpx/libmp3lame encoders and run the AppImage under private Sway/DBus:
 packaging/appimage/generate-fixtures.sh /tmp/gnune-fixtures
 GNUNE_QA_ROOT=/tmp/gnune-qa \
 GNUNE_QA_MEDIA=/tmp/gnune-fixtures \
-GNUNE_QA_APPIMAGE="$PWD/dist/Gnune-0.2.0-x86_64.AppImage" \
+GNUNE_QA_APPIMAGE="$PWD/dist/Gnune-0.3.0-x86_64.AppImage" \
   packaging/appimage/check-private-session.sh
 ```
 
