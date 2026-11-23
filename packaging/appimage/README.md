@@ -58,7 +58,14 @@ FUSE; `APPIMAGE_EXTRACT_AND_RUN=1 ./Gnune-0.3.0-x86_64.AppImage` runs without FU
 
 The launcher uses only its bundled plugin directory and a Gnune-specific registry,
 relocates loader definitions into a private temporary directory, and honors custom
-CA trust configuration. Extracting the AppImage permits replacing LGPL shared
+CA trust configuration. The launcher uses `CURL_CA_BUNDLE`, then `SSL_CERT_FILE`,
+or a readable host CA bundle for both curl and GIO/GStreamer HTTPS playback. It
+passes the selected PEM file through `GNUNE_TLS_CA_FILE`; before streaming,
+Gnune loads it as GIO’s default trust database, including for HTTP streams that
+redirect to HTTPS. An unreadable or invalid bundle blocks that stream and reports
+a trust configuration error; local playback remains available. Certificate and
+hostname verification remain enabled. Native and Flatpak launches retain
+their default GIO trust database. Extracting the AppImage permits replacing LGPL shared
 libraries. Close Gnune before replacing its extracted shared libraries.
 
 For isolated playback QA, generate synthetic fixtures using the host FFmpeg's

@@ -92,6 +92,17 @@ impl Media {
             pipeline.set_property("audio-sink", &sink);
         }
         if let Some(uri) = stream_uri {
+            // Configure trust for every stream, including HTTP redirects to HTTPS.
+            // Local playback and native/Flatpak GIO defaults remain available.
+            if let Some(anchors) = std::env::var_os("GNUNE_TLS_CA_FILE").filter(|v| !v.is_empty()) {
+                let database = gio::TlsFileDatabase::new(Path::new(&anchors)).map_err(|err| {
+                    format!(
+                        "Could not load streaming TLS trust anchors from {}: {err}. Check CURL_CA_BUNDLE or SSL_CERT_FILE and relaunch Gnune.",
+                        Path::new(&anchors).display()
+                    )
+                })?;
+                gio::TlsBackend::default().set_default_database(Some(&database));
+            }
             pipeline.set_property("uri", uri);
             // Streaming buffers stay in memory; never enable playbin's disk download mode.
             let flags = pipeline.property_value("flags");
